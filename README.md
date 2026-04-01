@@ -108,11 +108,11 @@ See the full [Developer Setup Guide](docs/development.md) for detailed instructi
 
 | Version | Focus | Status |
 |---|---|---|
-| **v0.1.0** | Core culling pipeline + minimal UI + XMP export | ✅ Current |
-| v0.2.0 | GPU acceleration, additional RAW formats, session persistence | 🔜 Planned |
-| v0.3.0 | Expression analysis, gaze detection, plugin architecture | 📋 Planned |
-| v0.4.0 | Aesthetic scoring, wildlife/action modes | 📋 Planned |
-| v1.0.0 | Stable APIs, localization, accessibility | 📋 Planned |
+| **v0.1.0** | Core culling pipeline + minimal UI + XMP export | Current |
+| v0.2.0 | GPU acceleration, additional RAW formats, session persistence | Planned |
+| v0.3.0 | Expression analysis, gaze detection, plugin architecture | Planned |
+| v0.4.0 | Aesthetic scoring, wildlife/action modes | Planned |
+| v1.0.0 | Stable APIs, localization, accessibility | Planned |
 
 ## Contributing
 
