@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question / Discussion
+    url: https://github.com/AtharvVatsal/keeper.raw/discussions
+    about: Ask questions and share ideas in Discussions instead of opening an issue.

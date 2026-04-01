@@ -1,0 +1,150 @@
+{
+  "total_images": 8,
+  "total_scenes": 8,
+  "total_keepers": 8,
+  "total_rejects": 0,
+  "total_unrated": 0,
+  "scenes": [
+    {
+      "id": 1,
+      "image_ids": [
+        1
+      ],
+      "keeper_id": 1
+    },
+    {
+      "id": 2,
+      "image_ids": [
+        2
+      ],
+      "keeper_id": 2
+    },
+    {
+      "id": 3,
+      "image_ids": [
+        3
+      ],
+      "keeper_id": 3
+    },
+    {
+      "id": 4,
+      "image_ids": [
+        4
+      ],
+      "keeper_id": 4
+    },
+    {
+      "id": 5,
+      "image_ids": [
+        5
+      ],
+      "keeper_id": 5
+    },
+    {
+      "id": 6,
+      "image_ids": [
+        6
+      ],
+      "keeper_id": 6
+    },
+    {
+      "id": 7,
+      "image_ids": [
+        7
+      ],
+      "keeper_id": 7
+    },
+    {
+      "id": 8,
+      "image_ids": [
+        8
+      ],
+      "keeper_id": 8
+    }
+  ],
+  "image_scores": [
+    {
+      "image_id": 1,
+      "sharpness_score": 166.24887672130455,
+      "has_face": false,
+      "face_bbox": null,
+      "blink_detected": false,
+      "eye_aspect_ratio": null,
+      "verdict": "Keeper"
+    },
+    {
+      "image_id": 2,
+      "sharpness_score": 176.35178829168655,
+      "has_face": false,
+      "face_bbox": null,
+      "blink_detected": false,
+      "eye_aspect_ratio": null,
+      "verdict": "Keeper"
+    },
+    {
+      "image_id": 3,
+      "sharpness_score": 1468.813948855144,
+      "has_face": false,
+      "face_bbox": null,
+      "blink_detected": false,
+      "eye_aspect_ratio": null,
+      "verdict": "Keeper"
+    },
+    {
+      "image_id": 4,
+      "sharpness_score": 301.8914281169391,
+      "has_face": true,
+      "face_bbox": {
+        "x": 3083.5056,
+        "y": 1346.1594,
+        "width": 1008.8794,
+        "height": 737.00684
+      },
+      "blink_detected": true,
+      "eye_aspect_ratio": 0.16906699700856231,
+      "verdict": "Keeper"
+    },
+    {
+      "image_id": 5,
+      "sharpness_score": 126.76229488743968,
+      "has_face": false,
+      "face_bbox": null,
+      "blink_detected": false,
+      "eye_aspect_ratio": null,
+      "verdict": "Keeper"
+    },
+    {
+      "image_id": 6,
+      "sharpness_score": 1379.5954681727335,
+      "has_face": true,
+      "face_bbox": {
+        "x": 3409.1533,
+        "y": 1052.9658,
+        "width": 1556.3467,
+        "height": 2010.2173
+      },
+      "blink_detected": true,
+      "eye_aspect_ratio": 0.19481209262041171,
+      "verdict": "Keeper"
+    },
+    {
+      "image_id": 7,
+      "sharpness_score": 126.91165638408084,
+      "has_face": false,
+      "face_bbox": null,
+      "blink_detected": false,
+      "eye_aspect_ratio": null,
+      "verdict": "Keeper"
+    },
+    {
+      "image_id": 8,
+      "sharpness_score": 104.03906927293777,
+      "has_face": false,
+      "face_bbox": null,
+      "blink_detected": false,
+      "eye_aspect_ratio": null,
+      "verdict": "Keeper"
+    }
+  ],
+  "processing_time_secs": 8.1907044
+}

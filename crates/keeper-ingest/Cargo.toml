@@ -1,0 +1,12 @@
+[package]
+name = "keeper-ingest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+keeper-core = { path = "../keeper-core" }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+rayon = { workspace = true }
+image = "0.25"

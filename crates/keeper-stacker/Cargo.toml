@@ -1,0 +1,19 @@
+[package]
+name = "keeper-stacker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+keeper-core = { path = "../keeper-core" }
+
+# Perceptual image hashing
+image_hasher = "2"
+
+# We need the `image` crate to decode JPEGs before hashing
+image = "0.25"
+
+# Logging
+tracing = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }

@@ -1,0 +1,29 @@
+[package]
+name = "keeper-vision"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+keeper-core = { path = "../keeper-core" }
+keeper-stacker = { path = "../keeper-stacker" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }
+
+# ONNX Runtime for Rust
+ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
+
+# Image processing — we need this to decode JPEGs and manipulate pixel data
+image = "0.25"
+
+# ndarray — the Rust equivalent of NumPy. ONNX models expect tensor inputs.
+ndarray = "0.17"
+
+# Error handling and logging (from workspace)
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[[bin]]
+name = "cull_test"
+path = "src/bin/cull_test.rs"
