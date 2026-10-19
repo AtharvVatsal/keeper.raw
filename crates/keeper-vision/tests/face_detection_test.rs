@@ -77,6 +77,14 @@ fn test_detect_faces_in_portrait() -> Result<()> {
         detections[0].confidence
     );
 
+    // A confidence is a probability. Values > 1 mean the parser is reading
+    // the wrong output channel (e.g. keypoint pixel coordinates).
+    assert!(
+        detections.iter().all(|d| d.confidence <= 1.0),
+        "Confidence above 1.0 — YOLO output parsed incorrectly: {:.3}",
+        detections[0].confidence
+    );
+
     assert!(detections[0].bbox.width > 0.0);
     assert!(detections[0].bbox.height > 0.0);
 
@@ -101,12 +109,18 @@ fn test_no_false_positives_in_landscape() -> Result<()> {
         "Found {} face(s) in no-face-photo.JPG (expected 0)",
         detections.len()
     );
-    for det in &detections {
+    for det in detections.iter().take(5) {
         println!(
             "  False positive: confidence={:.3}, bbox=({:.0}, {:.0})",
             det.confidence, det.bbox.x, det.bbox.y
         );
     }
+
+    assert!(
+        detections.is_empty(),
+        "Expected no faces in no-face-photo.JPG, found {}",
+        detections.len()
+    );
 
     Ok(())
 }

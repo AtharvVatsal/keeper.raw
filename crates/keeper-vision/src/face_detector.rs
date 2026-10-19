@@ -121,24 +121,48 @@ struct RawDetection {
     confidence: f32,
 }
 
+/// Parses a YOLOv8-face output tensor of shape `[1, channels, predictions]`,
+/// stored channel-major. Channel layout (single class — "face"):
+///
+/// | channels | meaning                                                   |
+/// |----------|-----------------------------------------------------------|
+/// | 0..4     | box centre x, centre y, width, height (input pixels)      |
+/// | 4        | **face confidence** (0..1)                                |
+/// | 5..      | optional keypoints, 3 values each (x, y, visibility) —    |
+/// |          | `yolov8n-face.onnx` has 5 (eyes, nose, mouth corners)     |
+///
+/// Only channel 4 is a confidence. Keypoint x/y are pixel coordinates (up to
+/// ~900); treating them as class scores made every image "contain" thousands
+/// of faces.
 fn parse_yolo_output(
     shape: &[usize],
     data: &[f32],
     confidence_threshold: f32,
 ) -> Vec<RawDetection> {
-    if shape.len() < 3 {
-        warn!("Unexpected YOLO output shape: {:?}", shape);
+    if shape.len() < 3 || shape[1] < 5 {
+        warn!(
+            "Unexpected YOLO output shape: {:?} (need [1, >=5, N])",
+            shape
+        );
         return vec![];
     }
 
     let num_values = shape[1];
     let num_preds = shape[2];
 
-    let num_classes = if num_values <= 4 { 1 } else { num_values - 4 };
+    if !(num_values - 5).is_multiple_of(3) {
+        warn!(
+            "YOLO output has {} values/prediction — expected 5 + 3×keypoints. \
+             Using channel 4 as the face confidence.",
+            num_values
+        );
+    }
 
     debug!(
-        "YOLO output: {} values/det, {} predictions, {} class(es)",
-        num_values, num_preds, num_classes
+        "YOLO output: {} values/det, {} predictions, {} keypoint(s)",
+        num_values,
+        num_preds,
+        (num_values - 5) / 3
     );
 
     let mut detections = Vec::new();
@@ -148,19 +172,7 @@ fn parse_yolo_output(
         let cy = data[num_preds + i];
         let w = data[num_preds * 2 + i];
         let h = data[num_preds * 3 + i];
-
-        let confidence = if num_classes == 1 {
-            data[4 * num_preds + i]
-        } else {
-            let mut max_score: f32 = 0.0;
-            for c in 4..4 + num_classes {
-                let score = data[c * num_preds + i];
-                if score > max_score {
-                    max_score = score;
-                }
-            }
-            max_score
-        };
+        let confidence = data[4 * num_preds + i];
 
         if confidence >= confidence_threshold {
             detections.push(RawDetection {
@@ -230,5 +242,60 @@ fn compute_iou(a: &RawDetection, b: &RawDetection) -> f32 {
         0.0
     } else {
         inter_area / union_area
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a YOLO output tensor `[1, channels, n]` (channel-major) where
+    /// prediction `i` has box (100, 100, 50, 60), face confidence `conf[i]`
+    /// and every keypoint value set to `kpt`.
+    fn tensor(channels: usize, conf: &[f32], kpt: f32) -> (Vec<usize>, Vec<f32>) {
+        let n = conf.len();
+        let mut data = vec![0.0f32; channels * n];
+        for i in 0..n {
+            data[i] = 100.0; // cx
+            data[n + i] = 100.0; // cy
+            data[2 * n + i] = 50.0; // w
+            data[3 * n + i] = 60.0; // h
+            data[4 * n + i] = conf[i];
+            for c in 5..channels {
+                data[c * n + i] = kpt;
+            }
+        }
+        (vec![1, channels, n], data)
+    }
+
+    #[test]
+    fn test_keypoint_values_are_not_read_as_confidence() {
+        // YOLOv8-face layout: 4 box + 1 confidence + 15 keypoint values.
+        // Keypoint coordinates are large pixel values; they must be ignored.
+        let (shape, data) = tensor(20, &[0.9, 0.01, 0.6], 900.0);
+        let dets = parse_yolo_output(&shape, &data, 0.5);
+
+        let confs: Vec<f32> = dets.iter().map(|d| d.confidence).collect();
+        assert_eq!(confs, vec![0.9, 0.6]);
+    }
+
+    #[test]
+    fn test_low_confidence_everywhere_gives_no_detections() {
+        let (shape, data) = tensor(20, &[0.007, 0.001, 0.0], 908.0);
+        assert!(parse_yolo_output(&shape, &data, 0.5).is_empty());
+    }
+
+    #[test]
+    fn test_plain_box_plus_confidence_layout() {
+        let (shape, data) = tensor(5, &[0.8, 0.2], 0.0);
+        let dets = parse_yolo_output(&shape, &data, 0.5);
+        assert_eq!(dets.len(), 1);
+        assert_eq!(dets[0].confidence, 0.8);
+    }
+
+    #[test]
+    fn test_too_few_channels_is_rejected() {
+        let (shape, data) = tensor(4, &[], 0.0);
+        assert!(parse_yolo_output(&shape, &data, 0.5).is_empty());
     }
 }
