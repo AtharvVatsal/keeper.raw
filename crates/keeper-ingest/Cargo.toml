@@ -10,3 +10,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 rayon = { workspace = true }
 image = "0.25"
+
+[dev-dependencies]
+# Used only by tests: checks that parsed EXIF timestamps stack correctly.
+keeper-stacker = { path = "../keeper-stacker" }

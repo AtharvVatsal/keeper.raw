@@ -9,6 +9,7 @@ pub struct ImageRecord {
     pub id: ImageId,
     pub file_path: PathBuf,
     pub file_name: String,
+    /// Capture time in **milliseconds** since the Unix epoch (from EXIF).
     pub timestamp: Option<i64>,
     pub camera_make: Option<String>,
     pub camera_model: Option<String>,

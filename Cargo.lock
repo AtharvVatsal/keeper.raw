@@ -2315,6 +2315,7 @@ dependencies = [
  "anyhow",
  "image",
  "keeper-core",
+ "keeper-stacker",
  "rayon",
  "serde_json",
  "tracing",

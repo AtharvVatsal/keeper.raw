@@ -155,6 +155,10 @@ pub fn extract_all(paths: &[PathBuf]) -> Result<Vec<ImageRecord>> {
     Ok(records)
 }
 
+/// Parses an EXIF `DateTimeOriginal` string ("YYYY:MM:DD HH:MM:SS") into
+/// **milliseconds** since the Unix epoch — the unit `ImageRecord::timestamp`
+/// and the stacker expect. The camera's local time is treated as UTC; only
+/// the gaps between shots matter for stacking.
 fn parse_exif_datetime(s: &str) -> Option<i64> {
     let parts: Vec<&str> = s.split([':', ' ']).collect();
     if parts.len() < 6 {
@@ -172,7 +176,7 @@ fn parse_exif_datetime(s: &str) -> Option<i64> {
     let total_seconds =
         (days_since_epoch as i64) * 86400 + (hour as i64) * 3600 + (min as i64) * 60 + (sec as i64);
 
-    Some(total_seconds)
+    Some(total_seconds * 1000)
 }
 
 fn days_from_date(year: i32, month: u32, day: u32) -> Option<i64> {
@@ -183,4 +187,62 @@ fn days_from_date(year: i32, month: u32, day: u32) -> Option<i64> {
     let m = if month <= 2 { month + 9 } else { month - 3 } as i64;
     let d = day as i64;
     Some(365 * y + y / 4 - y / 100 + y / 400 + (m * 306 + 5) / 10 + d - 719469)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use keeper_core::config::CullConfig;
+
+    fn record_at(id: u64, exif_datetime: &str) -> ImageRecord {
+        ImageRecord {
+            id,
+            file_path: PathBuf::from(format!("IMG_{id}.CR3")),
+            file_name: format!("IMG_{id}.CR3"),
+            timestamp: parse_exif_datetime(exif_datetime),
+            camera_make: None,
+            camera_model: None,
+            focal_length_mm: None,
+            aperture: None,
+            iso: None,
+            preview_width: 0,
+            preview_height: 0,
+            preview_data: vec![],
+        }
+    }
+
+    #[test]
+    fn test_parse_exif_datetime_returns_unix_millis() {
+        // 2024-06-15 14:30:00 UTC = 1_718_461_800 seconds since the Unix epoch.
+        assert_eq!(
+            parse_exif_datetime("2024:06:15 14:30:00"),
+            Some(1_718_461_800_000)
+        );
+    }
+
+    #[test]
+    fn test_parse_exif_datetime_rejects_garbage() {
+        assert_eq!(parse_exif_datetime(""), None);
+        assert_eq!(parse_exif_datetime("2024:13:01 00:00:00"), None);
+        assert_eq!(parse_exif_datetime("not a date"), None);
+    }
+
+    // Regression: ingest used to return seconds while the stacker expects
+    // milliseconds, so the default 3 s burst threshold acted like 50 minutes.
+    #[test]
+    fn test_parsed_timestamps_respect_burst_threshold() {
+        let config = CullConfig::default(); // burst_threshold_secs = 3.0
+
+        let images = vec![
+            record_at(1, "2024:06:15 14:30:00"),
+            record_at(2, "2024:06:15 14:30:02"), // 2 s later → same burst
+            record_at(3, "2024:06:15 14:30:07"), // 5 s later → new scene
+            record_at(4, "2024:06:15 14:40:07"), // 10 min later → new scene
+        ];
+
+        let scenes = keeper_stacker::stacker::stack_scenes(&images, &config).unwrap();
+        let groups: Vec<Vec<u64>> = scenes.into_iter().map(|s| s.image_ids).collect();
+
+        assert_eq!(groups, vec![vec![1, 2], vec![3], vec![4]]);
+    }
 }
