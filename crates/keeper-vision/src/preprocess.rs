@@ -149,6 +149,60 @@ pub fn jpeg_orientation(jpeg_bytes: &[u8]) -> u8 {
         .unwrap_or(1)
 }
 
+/// Samples a `size`×`size` RGB patch from `img`: a square of side `side`
+/// pixels centred on (`cx`, `cy`), rotated by `angle` radians (positive =
+/// clockwise in image coordinates, so passing a face's tilt levels it).
+/// Bilinear interpolation; areas outside the image are black.
+///
+/// This is how face crops are prepared for the landmark model: square (so
+/// vertical eye distances aren't squashed) and level (so tilted heads look
+/// like the upright faces the model was trained on).
+pub fn sample_square(
+    img: &DynamicImage,
+    cx: f32,
+    cy: f32,
+    side: f32,
+    angle: f32,
+    size: u32,
+) -> RgbImage {
+    let owned;
+    let rgb = match img.as_rgb8() {
+        Some(rgb) => rgb,
+        None => {
+            owned = img.to_rgb8();
+            &owned
+        }
+    };
+    let (sin, cos) = angle.sin_cos();
+    let half = size as f32 / 2.0;
+    let (max_x, max_y) = (rgb.width() as f32 - 1.0, rgb.height() as f32 - 1.0);
+
+    RgbImage::from_fn(size, size, |u, v| {
+        // Offset from the patch centre, in source pixels, then rotate.
+        let dx = (u as f32 + 0.5 - half) / size as f32 * side;
+        let dy = (v as f32 + 0.5 - half) / size as f32 * side;
+        let x = cx + dx * cos - dy * sin;
+        let y = cy + dx * sin + dy * cos;
+        if x < 0.0 || y < 0.0 || x >= max_x || y >= max_y {
+            return Rgb([0, 0, 0]);
+        }
+
+        let (x0, y0) = (x as u32, y as u32);
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let (p00, p10) = (rgb.get_pixel(x0, y0).0, rgb.get_pixel(x0 + 1, y0).0);
+        let (p01, p11) = (rgb.get_pixel(x0, y0 + 1).0, rgb.get_pixel(x0 + 1, y0 + 1).0);
+        let mut out = [0u8; 3];
+        for c in 0..3 {
+            let value = p00[c] as f32 * (1.0 - fx) * (1.0 - fy)
+                + p10[c] as f32 * fx * (1.0 - fy)
+                + p01[c] as f32 * (1.0 - fx) * fy
+                + p11[c] as f32 * fx * fy;
+            out[c] = value.round().clamp(0.0, 255.0) as u8;
+        }
+        Rgb(out)
+    })
+}
+
 /// Scales a bounding box by `factor` (e.g. from `small` to preview coordinates).
 pub fn scale_bbox(bbox: &BoundingBox, factor: f32) -> BoundingBox {
     BoundingBox {
@@ -257,6 +311,11 @@ impl LetterboxTransform {
 
         (x1, y1, x2 - x1, y2 - y1)
     }
+
+    /// Maps a single point from model-input coordinates to the original image.
+    pub fn to_original_point(&self, x: f32, y: f32) -> (f32, f32) {
+        ((x - self.pad_x) / self.scale, (y - self.pad_y) / self.scale)
+    }
 }
 
 pub fn image_to_yolo_tensor(img: &DynamicImage) -> Array4<f32> {
@@ -341,6 +400,33 @@ mod tests {
             bottom[2] > 200 && bottom[0] < 60,
             "bottom should be blue, got {bottom:?}"
         );
+    }
+
+    #[test]
+    fn test_sample_square_unrotated_and_rotated() {
+        // 100×100: left half red, right half blue.
+        let img = DynamicImage::ImageRgb8(RgbImage::from_fn(100, 100, |x, _| {
+            if x < 50 {
+                Rgb([255, 0, 0])
+            } else {
+                Rgb([0, 0, 255])
+            }
+        }));
+
+        // No rotation: left of patch red, right blue.
+        let p = sample_square(&img, 50.0, 50.0, 60.0, 0.0, 20);
+        assert_eq!(p.get_pixel(2, 10).0, [255, 0, 0]);
+        assert_eq!(p.get_pixel(17, 10).0, [0, 0, 255]);
+
+        // Rotated 90°: the patch's x axis now points down the source image,
+        // so its top rows sample the left (red) half.
+        let p = sample_square(&img, 50.0, 50.0, 60.0, std::f32::consts::FRAC_PI_2, 20);
+        assert_eq!(p.get_pixel(10, 17).0, [255, 0, 0]);
+        assert_eq!(p.get_pixel(10, 2).0, [0, 0, 255]);
+
+        // Outside the image → black.
+        let p = sample_square(&img, 0.0, 0.0, 60.0, 0.0, 20);
+        assert_eq!(p.get_pixel(0, 0).0, [0, 0, 0]);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 use keeper_stacker::hasher::{self, ImageHash};
 
 use crate::blink_detector::BlinkDetector;
-use crate::face_detector::FaceDetector;
+use crate::face_detector::{FaceDetection, FaceDetector};
 use crate::focus_scorer;
 use crate::preprocess;
 
@@ -256,11 +256,18 @@ impl CullPipeline {
         };
 
         // ---- Blink (on the work image) ---------------------------------------
+        // Head tilt from the two eye keypoints (an angle, so the same in
+        // `small` and `work` coordinates). Used to level the face crop.
+        let roll = primary_face.map(head_roll).unwrap_or(0.0);
         let (blink_detected, eye_aspect_ratio) = if let Some(ref bbox) = work_bbox {
             let mut detector = self.blink_detector.lock().unwrap();
-            match detector.detect_blink_image(&decoded.work, bbox, self.config.blink_ear_threshold)
-            {
-                Ok(result) => (result.blink_detected, Some(result.average_ear)),
+            match detector.detect_blink_image(
+                &decoded.work,
+                bbox,
+                roll,
+                self.config.blink_ear_threshold,
+            ) {
+                Ok(result) => (result.blink_detected, Some(result.decision_ear)),
                 Err(e) => {
                     debug!(
                         "Blink detection failed for '{}': {} (non-fatal)",
@@ -283,5 +290,49 @@ impl CullPipeline {
             verdict: Verdict::Unrated,
         };
         (score, Some(phash))
+    }
+}
+
+/// Head roll in radians from the two eye keypoints (0 if they're missing).
+/// Positive = clockwise in image coordinates.
+fn head_roll(face: &FaceDetection) -> f32 {
+    match (face.keypoints.first(), face.keypoints.get(1)) {
+        (Some(a), Some(b)) => (b.y - a.y).atan2(b.x - a.x),
+        _ => 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::face_detector::Keypoint;
+    use keeper_core::types::BoundingBox;
+
+    fn face_with_eyes(a: (f32, f32), b: (f32, f32)) -> FaceDetection {
+        let kp = |(x, y)| Keypoint {
+            x,
+            y,
+            confidence: 0.9,
+        };
+        FaceDetection {
+            bbox: BoundingBox {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            confidence: 0.9,
+            keypoints: vec![kp(a), kp(b)],
+        }
+    }
+
+    #[test]
+    fn test_head_roll() {
+        assert_eq!(head_roll(&face_with_eyes((10.0, 50.0), (30.0, 50.0))), 0.0);
+        let tilted = head_roll(&face_with_eyes((10.0, 50.0), (30.0, 70.0)));
+        assert!((tilted - std::f32::consts::FRAC_PI_4).abs() < 1e-6);
+        let mut no_kp = face_with_eyes((0.0, 0.0), (0.0, 0.0));
+        no_kp.keypoints.clear();
+        assert_eq!(head_roll(&no_kp), 0.0);
     }
 }

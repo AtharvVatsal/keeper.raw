@@ -10,6 +10,19 @@ use crate::runtime::OnnxModel;
 pub struct FaceDetection {
     pub bbox: BoundingBox,
     pub confidence: f32,
+    /// Facial keypoints in the same coordinates as `bbox`. For
+    /// `yolov8n-face.onnx` there are 5, in this order: the eye on the
+    /// image's left, the eye on the image's right, nose tip, left and right
+    /// mouth corner.
+    pub keypoints: Vec<Keypoint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Keypoint {
+    pub x: f32,
+    pub y: f32,
+    /// Visibility score from the model (0..1).
+    pub confidence: f32,
 }
 
 pub struct FaceDetector {
@@ -88,6 +101,18 @@ impl FaceDetector {
             .into_iter()
             .map(|det| {
                 let (x, y, w, h) = transform.to_original_coords(det.cx, det.cy, det.w, det.h);
+                let keypoints = det
+                    .keypoints
+                    .iter()
+                    .map(|kp| {
+                        let (kx, ky) = transform.to_original_point(kp.x, kp.y);
+                        Keypoint {
+                            x: kx,
+                            y: ky,
+                            confidence: kp.confidence,
+                        }
+                    })
+                    .collect();
                 FaceDetection {
                     bbox: BoundingBox {
                         x,
@@ -96,6 +121,7 @@ impl FaceDetector {
                         height: h,
                     },
                     confidence: det.confidence,
+                    keypoints,
                 }
             })
             .collect();
@@ -119,6 +145,8 @@ struct RawDetection {
     w: f32,
     h: f32,
     confidence: f32,
+    /// In model-input (letterboxed 640×640) coordinates.
+    keypoints: Vec<Keypoint>,
 }
 
 /// Parses a YOLOv8-face output tensor of shape `[1, channels, predictions]`,
@@ -165,24 +193,32 @@ fn parse_yolo_output(
         (num_values - 5) / 3
     );
 
+    let num_keypoints = (num_values - 5) / 3;
     let mut detections = Vec::new();
 
     for i in 0..num_preds {
-        let cx = data[i];
-        let cy = data[num_preds + i];
-        let w = data[num_preds * 2 + i];
-        let h = data[num_preds * 3 + i];
         let confidence = data[4 * num_preds + i];
-
-        if confidence >= confidence_threshold {
-            detections.push(RawDetection {
-                cx,
-                cy,
-                w,
-                h,
-                confidence,
-            });
+        if confidence < confidence_threshold {
+            continue;
         }
+
+        // Keypoint k occupies channels 5+3k (x), 6+3k (y), 7+3k (visibility).
+        let keypoints = (0..num_keypoints)
+            .map(|k| Keypoint {
+                x: data[(5 + 3 * k) * num_preds + i],
+                y: data[(6 + 3 * k) * num_preds + i],
+                confidence: data[(7 + 3 * k) * num_preds + i],
+            })
+            .collect();
+
+        detections.push(RawDetection {
+            cx: data[i],
+            cy: data[num_preds + i],
+            w: data[num_preds * 2 + i],
+            h: data[num_preds * 3 + i],
+            confidence,
+            keypoints,
+        });
     }
 
     detections.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
@@ -277,6 +313,39 @@ mod tests {
 
         let confs: Vec<f32> = dets.iter().map(|d| d.confidence).collect();
         assert_eq!(confs, vec![0.9, 0.6]);
+
+        // ...but they are kept as the detection's 5 keypoints.
+        assert_eq!(dets[0].keypoints.len(), 5);
+        assert!(dets[0]
+            .keypoints
+            .iter()
+            .all(|k| k.x == 900.0 && k.y == 900.0 && k.confidence == 900.0));
+    }
+
+    #[test]
+    fn test_keypoint_channel_layout() {
+        // One prediction, 2 keypoints: channels 5,6,7 then 8,9,10.
+        let data = vec![
+            100.0, 100.0, 50.0, 60.0, 0.9, // box + confidence
+            11.0, 12.0, 0.8, // keypoint 0: x, y, visibility
+            21.0, 22.0, 0.7, // keypoint 1
+        ];
+        let dets = parse_yolo_output(&[1, 11, 1], &data, 0.5);
+        assert_eq!(
+            dets[0].keypoints,
+            vec![
+                Keypoint {
+                    x: 11.0,
+                    y: 12.0,
+                    confidence: 0.8
+                },
+                Keypoint {
+                    x: 21.0,
+                    y: 22.0,
+                    confidence: 0.7
+                },
+            ]
+        );
     }
 
     #[test]
