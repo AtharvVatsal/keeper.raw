@@ -64,6 +64,3 @@ keeper-raw-previews/
 .env
 .env.local
 .env.*.local
-
-# Claude
-.claude/
