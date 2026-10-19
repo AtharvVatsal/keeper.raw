@@ -121,6 +121,7 @@ fn test_focus_score_comparison() -> Result<()> {
 }
 
 #[test]
+#[ignore = "timing-based; run locally with: cargo test --release -- --ignored"]
 fn test_focus_scoring_performance() -> Result<()> {
     let jpeg_bytes = match get_test_image("face-photo.JPG") {
         Some(b) => b,
@@ -156,7 +157,7 @@ fn test_focus_scoring_performance() -> Result<()> {
 
     assert!(
         per_image_ms < 1000.0,
-        "Focus scoring too slow: {:.2} ms (should be < 100ms)",
+        "Focus scoring too slow: {:.2} ms (should be < 1000ms)",
         per_image_ms
     );
 

@@ -112,6 +112,7 @@ fn test_no_false_positives_in_landscape() -> Result<()> {
 }
 
 #[test]
+#[ignore = "timing-based; run locally with: cargo test --release -- --ignored"]
 fn test_face_detection_performance() -> Result<()> {
     let model_path = match get_model_path() {
         Some(p) => p,

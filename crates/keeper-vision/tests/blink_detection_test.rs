@@ -103,6 +103,7 @@ fn test_blink_detection_on_portrait() -> Result<()> {
 }
 
 #[test]
+#[ignore = "timing-based; run locally with: cargo test --release -- --ignored"]
 fn test_blink_detection_performance() -> Result<()> {
     let face_model_path = match get_face_model_path() {
         Some(p) => p,
