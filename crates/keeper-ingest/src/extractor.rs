@@ -66,6 +66,8 @@ pub fn extract_preview(raw_path: &Path) -> Result<ImageRecord> {
             "-FocalLength",
             "-FNumber",
             "-ISO",
+            // `#` = numeric value (1–8) instead of text like "Rotate 270 CW".
+            "-Orientation#",
         ])
         .arg(raw_path)
         .output()?;
@@ -106,6 +108,16 @@ pub fn extract_preview(raw_path: &Path) -> Result<ImageRecord> {
 
     let iso = exif.get("ISO").and_then(|v| v.as_u64()).map(|v| v as u32);
 
+    // Portrait shots are stored sideways; the embedded preview is NOT rotated
+    // and has no orientation tag of its own, so the RAW's tag is the only
+    // source. Missing/invalid → 1 (upright).
+    let orientation = exif
+        .get("Orientation")
+        .and_then(|v| v.as_u64())
+        .filter(|v| (1..=8).contains(v))
+        .map(|v| v as u8)
+        .unwrap_or(1);
+
     info!(
         "Extracted preview from {} ({}x{}, {} bytes)",
         file_name,
@@ -126,8 +138,47 @@ pub fn extract_preview(raw_path: &Path) -> Result<ImageRecord> {
         iso,
         preview_width,
         preview_height,
+        orientation,
         preview_data,
     })
+}
+
+// =============================================================================
+// Orientation tag for display
+//
+// The webview shows the temp preview JPEG with an <img>, and browsers rotate
+// images according to their EXIF Orientation tag. Embedded RAW previews have
+// no EXIF at all, so we insert a minimal EXIF block holding only that tag.
+// =============================================================================
+
+/// Returns `jpeg` with an EXIF APP1 segment containing just `Orientation`
+/// inserted right after the start-of-image marker. Returns the bytes unchanged
+/// if `orientation` is 1 (upright) or not a valid EXIF value, or if `jpeg`
+/// doesn't start with a JPEG SOI marker.
+pub fn with_orientation_tag(jpeg: &[u8], orientation: u8) -> Vec<u8> {
+    if orientation == 1 || !(1..=8).contains(&orientation) || !jpeg.starts_with(&[0xFF, 0xD8]) {
+        return jpeg.to_vec();
+    }
+
+    #[rustfmt::skip]
+    let app1: [u8; 36] = [
+        0xFF, 0xE1, 0x00, 0x22,             // APP1 marker, segment length 34
+        b'E', b'x', b'i', b'f', 0x00, 0x00, // "Exif\0\0"
+        b'M', b'M', 0x00, 0x2A,             // TIFF header: big-endian, magic 42
+        0x00, 0x00, 0x00, 0x08,             //   offset of IFD0
+        0x00, 0x01,                         // IFD0: 1 entry
+        0x01, 0x12,                         //   tag 0x0112 = Orientation
+        0x00, 0x03,                         //   type SHORT
+        0x00, 0x00, 0x00, 0x01,             //   count 1
+        0x00, orientation, 0x00, 0x00,      //   value (left-aligned)
+        0x00, 0x00, 0x00, 0x00,             // no next IFD
+    ];
+
+    let mut out = Vec::with_capacity(jpeg.len() + app1.len());
+    out.extend_from_slice(&jpeg[..2]);
+    out.extend_from_slice(&app1);
+    out.extend_from_slice(&jpeg[2..]);
+    out
 }
 
 pub fn extract_all(paths: &[PathBuf]) -> Result<Vec<ImageRecord>> {
@@ -207,8 +258,48 @@ mod tests {
             iso: None,
             preview_width: 0,
             preview_height: 0,
+            orientation: 1,
             preview_data: vec![],
         }
+    }
+
+    fn small_jpeg() -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(40, 20, image::Rgb([200, 100, 50]));
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut bytes)
+            .encode_image(&img)
+            .unwrap();
+        bytes
+    }
+
+    fn read_orientation(jpeg: &[u8]) -> image::metadata::Orientation {
+        use image::ImageDecoder;
+        let mut decoder =
+            image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(jpeg)).unwrap();
+        decoder.orientation().unwrap()
+    }
+
+    #[test]
+    fn test_orientation_tag_is_readable_and_image_still_decodes() {
+        use image::metadata::Orientation;
+        let tagged = with_orientation_tag(&small_jpeg(), 6);
+        assert_eq!(read_orientation(&tagged), Orientation::Rotate90);
+        assert_eq!(
+            read_orientation(&with_orientation_tag(&small_jpeg(), 8)),
+            Orientation::Rotate270
+        );
+
+        let decoded = image::load_from_memory(&tagged).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (40, 20));
+    }
+
+    #[test]
+    fn test_orientation_tag_skipped_when_upright_or_invalid() {
+        let jpeg = small_jpeg();
+        assert_eq!(with_orientation_tag(&jpeg, 1), jpeg);
+        assert_eq!(with_orientation_tag(&jpeg, 0), jpeg);
+        assert_eq!(with_orientation_tag(&jpeg, 9), jpeg);
+        assert_eq!(with_orientation_tag(b"not a jpeg", 6), b"not a jpeg");
     }
 
     #[test]

@@ -286,6 +286,7 @@ fn load_jpeg_images(dir: &Path) -> Result<Vec<ImageRecord>> {
             iso: None,
             preview_width: 0,
             preview_height: 0,
+            orientation: keeper_vision::preprocess::jpeg_orientation(&preview_data),
             preview_data,
         });
     }

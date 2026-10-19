@@ -1,4 +1,5 @@
 pub mod extractor;
+pub use extractor::with_orientation_tag;
 pub mod scanner;
 
 use keeper_core::types::ImageRecord;

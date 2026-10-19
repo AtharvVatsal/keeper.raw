@@ -211,7 +211,8 @@ impl CullPipeline {
         }
 
         // ---- Decode once ----------------------------------------------------
-        let decoded = match preprocess::decode_for_analysis(&image.preview_data) {
+        let decoded = match preprocess::decode_for_analysis(&image.preview_data, image.orientation)
+        {
             Ok(d) => d,
             Err(e) => {
                 warn!("Could not decode preview for '{}': {}", image.file_name, e);

@@ -200,6 +200,7 @@ mod tests {
             iso: None,
             preview_width: 0,
             preview_height: 0,
+            orientation: 1,
             preview_data: vec![],
         }
     }

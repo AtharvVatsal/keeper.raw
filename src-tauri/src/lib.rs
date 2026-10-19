@@ -110,9 +110,16 @@ async fn ingest_folder(
         .iter()
         .map(|r| {
             let preview_path = preview_dir.join(format!("{}.jpg", r.id));
-            if let Err(e) = fs::write(&preview_path, &r.preview_data) {
+            // Tag the preview with the shot's orientation so the webview
+            // displays portrait shots upright (embedded previews have no EXIF).
+            let preview_bytes = keeper_ingest::with_orientation_tag(&r.preview_data, r.orientation);
+            if let Err(e) = fs::write(&preview_path, &preview_bytes) {
                 eprintln!("Warning: could not save preview for {}: {}", r.file_name, e);
             }
+
+            // Upright size: matches what the webview shows and the face boxes
+            // the pipeline returns (both are in upright coordinates).
+            let (preview_width, preview_height) = r.upright_preview_size();
 
             ImageSummary {
                 id: r.id,
@@ -121,8 +128,8 @@ async fn ingest_folder(
                 camera_model: r.camera_model.clone(),
                 focal_length_mm: r.focal_length_mm,
                 iso: r.iso,
-                preview_width: r.preview_width,
-                preview_height: r.preview_height,
+                preview_width,
+                preview_height,
                 preview_path: preview_path.to_string_lossy().to_string(),
             }
         })

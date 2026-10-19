@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use image::imageops::FilterType;
+use image::metadata::Orientation;
 use image::{DynamicImage, GrayImage, Rgb, RgbImage};
 use keeper_core::types::BoundingBox;
 use ndarray::Array4;
@@ -57,14 +58,28 @@ impl AnalysisImage {
 /// Uses `jpeg-decoder`'s IDCT scaling for a cheap 1/2-scale decode; falls back
 /// to a full decode via the `image` crate for anything it can't handle
 /// (e.g. CMYK or 16-bit JPEGs).
-pub fn decode_for_analysis(jpeg_bytes: &[u8]) -> Result<AnalysisImage> {
-    let (preview_width, preview_height, work) = match decode_scaled(jpeg_bytes) {
+///
+/// `orientation` is the shot's EXIF orientation (1–8). The image is rotated
+/// upright before anything else, so faces are analysed the right way up and
+/// all sizes/coordinates in the result are upright.
+pub fn decode_for_analysis(jpeg_bytes: &[u8], orientation: u8) -> Result<AnalysisImage> {
+    let (mut preview_width, mut preview_height, mut work) = match decode_scaled(jpeg_bytes) {
         Some(decoded) => decoded,
         None => {
             let img = decode_jpeg(jpeg_bytes)?;
             (img.width(), img.height(), img)
         }
     };
+
+    // ---- Rotate upright ----------------------------------------------------
+    // Portrait shots are stored sideways; analysing them as-is shows faces
+    // lying on their side to the face and landmark models.
+    if let Some(o) = Orientation::from_exif(orientation) {
+        work.apply_orientation(o);
+        if (5..=8).contains(&orientation) {
+            std::mem::swap(&mut preview_width, &mut preview_height);
+        }
+    }
 
     let small = if work.width().max(work.height()) > SMALL_LONG_EDGE {
         // `thumbnail` is a fast area-averaging downscale — ~4× cheaper than
@@ -121,6 +136,17 @@ fn decode_scaled(jpeg_bytes: &[u8]) -> Option<(u32, u32, DynamicImage)> {
     };
 
     Some((preview_width, preview_height, image))
+}
+
+/// Reads the EXIF orientation (1–8) embedded in a JPEG file itself, for
+/// inputs that are plain JPEGs rather than RAW previews. Returns 1 (upright)
+/// if there is no tag or it can't be read.
+pub fn jpeg_orientation(jpeg_bytes: &[u8]) -> u8 {
+    use image::ImageDecoder;
+    image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(jpeg_bytes))
+        .and_then(|mut decoder| decoder.orientation())
+        .map(|o| o.to_exif())
+        .unwrap_or(1)
 }
 
 /// Scales a bounding box by `factor` (e.g. from `small` to preview coordinates).
@@ -253,7 +279,7 @@ mod tests {
 
     #[test]
     fn test_large_preview_decodes_at_half_scale() {
-        let decoded = decode_for_analysis(&jpeg_of_size(4800, 3200)).unwrap();
+        let decoded = decode_for_analysis(&jpeg_of_size(4800, 3200), 1).unwrap();
         assert_eq!(
             (decoded.preview_width, decoded.preview_height),
             (4800, 3200)
@@ -268,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_small_preview_decodes_at_full_size() {
-        let decoded = decode_for_analysis(&jpeg_of_size(1600, 1067)).unwrap();
+        let decoded = decode_for_analysis(&jpeg_of_size(1600, 1067), 1).unwrap();
         assert_eq!((decoded.work.width(), decoded.work.height()), (1600, 1067));
         assert!((decoded.work_to_preview() - 1.0).abs() < 1e-6);
         assert!(decoded.small.width() <= SMALL_LONG_EDGE);
@@ -276,8 +302,51 @@ mod tests {
 
     #[test]
     fn test_tiny_preview_is_not_upscaled() {
-        let decoded = decode_for_analysis(&jpeg_of_size(320, 240)).unwrap();
+        let decoded = decode_for_analysis(&jpeg_of_size(320, 240), 1).unwrap();
         assert_eq!((decoded.small.width(), decoded.small.height()), (320, 240));
+    }
+
+    #[test]
+    fn test_rotated_shot_is_analysed_upright() {
+        // Stored sideways: left half red, right half blue.
+        let img = RgbImage::from_fn(4800, 3200, |x, _| {
+            if x < 2400 {
+                Rgb([255, 0, 0])
+            } else {
+                Rgb([0, 0, 255])
+            }
+        });
+        let mut bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut bytes, 90)
+            .encode_image(&img)
+            .unwrap();
+
+        // EXIF 6 = rotate 90° clockwise → the left (red) half ends up on top.
+        let decoded = decode_for_analysis(&bytes, 6).unwrap();
+        assert_eq!(
+            (decoded.preview_width, decoded.preview_height),
+            (3200, 4800)
+        );
+        assert_eq!((decoded.work.width(), decoded.work.height()), (1600, 2400));
+        assert!(decoded.small.height() > decoded.small.width());
+
+        let work = decoded.work.to_rgb8();
+        let top = work.get_pixel(800, 100);
+        let bottom = work.get_pixel(800, 2300);
+        assert!(
+            top[0] > 200 && top[2] < 60,
+            "top should be red, got {top:?}"
+        );
+        assert!(
+            bottom[2] > 200 && bottom[0] < 60,
+            "bottom should be blue, got {bottom:?}"
+        );
+    }
+
+    #[test]
+    fn test_jpeg_orientation_defaults_to_upright() {
+        assert_eq!(jpeg_orientation(&jpeg_of_size(64, 48)), 1);
+        assert_eq!(jpeg_orientation(b"not a jpeg"), 1);
     }
 
     #[test]

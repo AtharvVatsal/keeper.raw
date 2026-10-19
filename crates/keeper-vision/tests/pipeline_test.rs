@@ -44,6 +44,7 @@ fn make_record(id: u64, name: &str, timestamp_ms: Option<i64>, data: Vec<u8>) ->
         iso: None,
         preview_width: 0,
         preview_height: 0,
+        orientation: keeper_vision::preprocess::jpeg_orientation(&data),
         preview_data: data,
     }
 }

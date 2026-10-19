@@ -16,10 +16,31 @@ pub struct ImageRecord {
     pub focal_length_mm: Option<f32>,
     pub aperture: Option<f32>,
     pub iso: Option<u32>,
+    /// Size of the embedded preview **as stored** (before rotation).
     pub preview_width: u32,
     pub preview_height: u32,
+    /// EXIF orientation of the shot (1 = upright; 6 / 8 = rotated 90° CW /
+    /// 270° CW). Embedded RAW previews are stored un-rotated, so this must be
+    /// applied before analysis or display.
+    pub orientation: u8,
     #[serde(skip)]
     pub preview_data: Vec<u8>,
+}
+
+impl ImageRecord {
+    /// EXIF orientations 5–8 swap width and height.
+    pub fn is_rotated_quarter_turn(&self) -> bool {
+        (5..=8).contains(&self.orientation)
+    }
+
+    /// Preview size as the user should see it (after applying orientation).
+    pub fn upright_preview_size(&self) -> (u32, u32) {
+        if self.is_rotated_quarter_turn() {
+            (self.preview_height, self.preview_width)
+        } else {
+            (self.preview_width, self.preview_height)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

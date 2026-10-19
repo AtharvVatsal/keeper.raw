@@ -29,6 +29,7 @@ fn load_test_image(id: u64, filename: &str, timestamp_ms: i64) -> Option<ImageRe
         iso: None,
         preview_width: 0,
         preview_height: 0,
+        orientation: 1,
         preview_data: jpeg_bytes,
     })
 }
