@@ -16,6 +16,10 @@ ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
 # Image processing — we need this to decode JPEGs and manipulate pixel data
 image = "0.25"
 
+# Scaled JPEG decoding (IDCT scaling to 1/2, 1/4, 1/8) — zune-jpeg (used by
+# `image`) can only decode at full size.
+jpeg-decoder = "0.3"
+
 # ndarray — the Rust equivalent of NumPy. ONNX models expect tensor inputs.
 ndarray = "0.17"
 

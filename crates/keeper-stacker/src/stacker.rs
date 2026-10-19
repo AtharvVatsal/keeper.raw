@@ -1,12 +1,40 @@
 use anyhow::Result;
-use image_hasher::ImageHash;
 use keeper_core::config::CullConfig;
 use keeper_core::types::{ImageId, ImageRecord, Scene, SceneId};
+use std::collections::HashMap;
 use tracing::{debug, info};
 
-use crate::hasher;
+use crate::hasher::{self, ImageHash};
 
+/// Groups images into Scenes, decoding previews to compute pHashes as needed
+/// (only for images that share a time cluster with others).
 pub fn stack_scenes(images: &[ImageRecord], config: &CullConfig) -> Result<Vec<Scene>> {
+    stack_scenes_by(images, config, |record| {
+        if record.preview_data.is_empty() {
+            None
+        } else {
+            hasher::try_compute_phash(&record.preview_data, &record.file_name)
+        }
+    })
+}
+
+/// Same as [`stack_scenes`], but uses pHashes the caller already computed
+/// (the vision pipeline hashes each image while it has it decoded, so the
+/// stacker doesn't need to decode previews again). Images missing from
+/// `hashes` are never split off by pHash.
+pub fn stack_scenes_with_hashes(
+    images: &[ImageRecord],
+    hashes: &HashMap<ImageId, ImageHash>,
+    config: &CullConfig,
+) -> Result<Vec<Scene>> {
+    stack_scenes_by(images, config, |record| hashes.get(&record.id).cloned())
+}
+
+fn stack_scenes_by(
+    images: &[ImageRecord],
+    config: &CullConfig,
+    hash_of: impl Fn(&ImageRecord) -> Option<ImageHash>,
+) -> Result<Vec<Scene>> {
     if images.is_empty() {
         info!("No images to stack.");
         return Ok(vec![]);
@@ -30,7 +58,11 @@ pub fn stack_scenes(images: &[ImageRecord], config: &CullConfig) -> Result<Vec<S
             .filter_map(|id| images.iter().find(|img| img.id == *id))
             .collect();
 
-        let sub_groups = split_by_phash(&cluster_records, config.phash_similarity_threshold);
+        let sub_groups = split_by_phash(
+            &cluster_records,
+            config.phash_similarity_threshold,
+            &hash_of,
+        );
 
         for group in sub_groups {
             scenes.push(Scene {
@@ -108,21 +140,16 @@ fn cluster_by_timestamp(images: &[ImageRecord], threshold_secs: f64) -> Vec<Vec<
     clusters
 }
 
-fn split_by_phash(cluster_records: &[&ImageRecord], threshold: u32) -> Vec<Vec<ImageId>> {
+fn split_by_phash(
+    cluster_records: &[&ImageRecord],
+    threshold: u32,
+    hash_of: &impl Fn(&ImageRecord) -> Option<ImageHash>,
+) -> Vec<Vec<ImageId>> {
     if cluster_records.len() <= 1 {
         return vec![cluster_records.iter().map(|r| r.id).collect()];
     }
 
-    let hashes: Vec<Option<ImageHash>> = cluster_records
-        .iter()
-        .map(|record| {
-            if record.preview_data.is_empty() {
-                None
-            } else {
-                hasher::try_compute_phash(&record.preview_data, &record.file_name)
-            }
-        })
-        .collect();
+    let hashes: Vec<Option<ImageHash>> = cluster_records.iter().map(|r| hash_of(r)).collect();
 
     let mut sub_groups: Vec<Vec<ImageId>> = Vec::new();
     let mut current_group = vec![cluster_records[0].id];
@@ -308,6 +335,32 @@ mod tests {
         for scene in &scenes {
             assert!(scene.keeper_id.is_none());
         }
+    }
+
+    #[test]
+    fn test_precomputed_hashes_split_changed_composition() {
+        let config = CullConfig::default();
+        let images = vec![
+            make_image(1, Some(0)),
+            make_image(2, Some(200)),
+            make_image(3, Some(400)),
+        ];
+        // Images 1 and 2 hash identically; image 3 differs in all 64 bits.
+        let same = ImageHash::from_bytes(&[0u8; 8]).unwrap();
+        let different = ImageHash::from_bytes(&[0xFFu8; 8]).unwrap();
+        let hashes = HashMap::from([(1, same.clone()), (2, same), (3, different)]);
+
+        let scenes = stack_scenes_with_hashes(&images, &hashes, &config).unwrap();
+        let groups: Vec<Vec<ImageId>> = scenes.into_iter().map(|s| s.image_ids).collect();
+        assert_eq!(groups, vec![vec![1, 2], vec![3]]);
+    }
+
+    #[test]
+    fn test_missing_hashes_never_split() {
+        let config = CullConfig::default();
+        let images = vec![make_image(1, Some(0)), make_image(2, Some(200))];
+        let scenes = stack_scenes_with_hashes(&images, &HashMap::new(), &config).unwrap();
+        assert_eq!(scenes.len(), 1);
     }
 
     #[test]

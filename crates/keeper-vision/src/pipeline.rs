@@ -7,9 +7,12 @@ use std::path::Path;
 use std::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use keeper_stacker::hasher::{self, ImageHash};
+
 use crate::blink_detector::BlinkDetector;
 use crate::face_detector::FaceDetector;
 use crate::focus_scorer;
+use crate::preprocess;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CullManifest {
@@ -68,23 +71,31 @@ impl CullPipeline {
 
         info!("Starting cull pipeline on {} images...", images.len());
 
-        info!("Stage 1/3: Stacking scenes...");
-        let mut scenes = keeper_stacker::stacker::stack_scenes(images, &self.config)
-            .context("Scene stacking failed")?;
+        // Analysis comes first: each preview is decoded ONCE and every stage
+        // (pHash, face, focus, blink) works on that decode. Stacking then only
+        // needs timestamps + the stored hashes. Images are processed one at a
+        // time so only one decoded preview is in memory at once.
+        info!("Stage 1/3: Analyzing images (decode once → pHash, face, focus, blink)...");
+
+        let mut hashes: HashMap<ImageId, ImageHash> = HashMap::with_capacity(images.len());
+        let mut image_scores: Vec<ImageScore> = Vec::with_capacity(images.len());
+
+        for (i, image) in images.iter().enumerate() {
+            if (i + 1) % 100 == 0 || i + 1 == images.len() {
+                info!("  Processing image {}/{}", i + 1, images.len());
+            }
+            let (score, hash) = self.analyze_single_image(image);
+            if let Some(hash) = hash {
+                hashes.insert(image.id, hash);
+            }
+            image_scores.push(score);
+        }
+
+        info!("Stage 2/3: Stacking scenes...");
+        let mut scenes =
+            keeper_stacker::stacker::stack_scenes_with_hashes(images, &hashes, &self.config)
+                .context("Scene stacking failed")?;
         info!("  → {} scenes created", scenes.len());
-
-        info!("Stage 2/3: Analyzing images (face detection + scoring + blink)...");
-
-        let image_scores: Vec<ImageScore> = images
-            .iter()
-            .enumerate()
-            .map(|(i, image)| {
-                if (i + 1) % 100 == 0 || i + 1 == images.len() {
-                    info!("  Processing image {}/{}", i + 1, images.len());
-                }
-                self.analyze_single_image(image)
-            })
-            .collect();
 
         let score_map: HashMap<ImageId, &ImageScore> =
             image_scores.iter().map(|s| (s.image_id, s)).collect();
@@ -178,30 +189,44 @@ impl CullPipeline {
         })
     }
 
-    fn analyze_single_image(&self, image: &ImageRecord) -> ImageScore {
+    /// Analyses one image from a single decode. Returns its score and its
+    /// pHash (`None` if the preview couldn't be decoded).
+    fn analyze_single_image(&self, image: &ImageRecord) -> (ImageScore, Option<ImageHash>) {
+        let unscored = ImageScore {
+            image_id: image.id,
+            sharpness_score: 0.0,
+            has_face: false,
+            face_bbox: None,
+            blink_detected: false,
+            eye_aspect_ratio: None,
+            verdict: Verdict::Unrated,
+        };
+
         if image.preview_data.is_empty() {
             warn!(
                 "Image '{}' has no preview data — skipping analysis",
                 image.file_name
             );
-            return ImageScore {
-                image_id: image.id,
-                sharpness_score: 0.0,
-                has_face: false,
-                face_bbox: None,
-                blink_detected: false,
-                eye_aspect_ratio: None,
-                verdict: Verdict::Unrated,
-            };
+            return (unscored, None);
         }
 
+        // ---- Decode once ----------------------------------------------------
+        let decoded = match preprocess::decode_for_analysis(&image.preview_data) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("Could not decode preview for '{}': {}", image.file_name, e);
+                return (unscored, None);
+            }
+        };
+
+        // ---- pHash (on the small copy) --------------------------------------
+        let phash = hasher::compute_phash_image(&decoded.small);
+
+        // ---- Face detection (on the small copy) -----------------------------
         let faces = {
             let mut detector = self.face_detector.lock().unwrap();
-            match detector.detect(
-                &image.preview_data,
-                self.config.face_detection_confidence,
-                0.45,
-            ) {
+            match detector.detect_image(&decoded.small, self.config.face_detection_confidence, 0.45)
+            {
                 Ok(f) => f,
                 Err(e) => {
                     warn!("Face detection failed for '{}': {}", image.file_name, e);
@@ -212,20 +237,27 @@ impl CullPipeline {
 
         let primary_face = faces.first();
         let has_face = primary_face.is_some();
-        let face_bbox = primary_face.map(|f| f.bbox);
+        // Stored boxes are in preview coordinates (the loupe zooms on them);
+        // focus and blink need the same box in `work` coordinates.
+        let face_bbox =
+            primary_face.map(|f| preprocess::scale_bbox(&f.bbox, decoded.small_to_preview()));
+        let work_bbox =
+            face_bbox.map(|b| preprocess::scale_bbox(&b, 1.0 / decoded.work_to_preview()));
 
-        let sharpness_score =
-            match focus_scorer::score_sharpness(&image.preview_data, face_bbox.as_ref()) {
-                Ok(result) => result.sharpness_score,
-                Err(e) => {
-                    warn!("Focus scoring failed for '{}': {}", image.file_name, e);
-                    0.0
-                }
-            };
+        // ---- Focus (on the work image) ---------------------------------------
+        let gray = decoded.work.to_luma8();
+        let sharpness_score = match focus_scorer::score_sharpness_gray(&gray, work_bbox.as_ref()) {
+            Ok(result) => result.sharpness_score,
+            Err(e) => {
+                warn!("Focus scoring failed for '{}': {}", image.file_name, e);
+                0.0
+            }
+        };
 
-        let (blink_detected, eye_aspect_ratio) = if let Some(ref bbox) = face_bbox {
+        // ---- Blink (on the work image) ---------------------------------------
+        let (blink_detected, eye_aspect_ratio) = if let Some(ref bbox) = work_bbox {
             let mut detector = self.blink_detector.lock().unwrap();
-            match detector.detect_blink(&image.preview_data, bbox, self.config.blink_ear_threshold)
+            match detector.detect_blink_image(&decoded.work, bbox, self.config.blink_ear_threshold)
             {
                 Ok(result) => (result.blink_detected, Some(result.average_ear)),
                 Err(e) => {
@@ -240,7 +272,7 @@ impl CullPipeline {
             (false, None)
         };
 
-        ImageScore {
+        let score = ImageScore {
             image_id: image.id,
             sharpness_score,
             has_face,
@@ -248,6 +280,7 @@ impl CullPipeline {
             blink_detected,
             eye_aspect_ratio,
             verdict: Verdict::Unrated,
-        }
+        };
+        (score, Some(phash))
     }
 }

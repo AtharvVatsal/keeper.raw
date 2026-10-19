@@ -15,3 +15,4 @@ keeper-stacker = { path = "../keeper-stacker" }
 keeper-vision = { path = "../keeper-vision" }
 
 anyhow = { workspace = true }
+serde_json = { workspace = true }

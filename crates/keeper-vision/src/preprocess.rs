@@ -1,12 +1,136 @@
 use anyhow::{Context, Result};
 use image::imageops::FilterType;
-use image::{DynamicImage, Rgb, RgbImage};
+use image::{DynamicImage, GrayImage, Rgb, RgbImage};
+use keeper_core::types::BoundingBox;
 use ndarray::Array4;
 use tracing::debug;
 
 pub fn decode_jpeg(jpeg_bytes: &[u8]) -> Result<DynamicImage> {
     let img = image::load_from_memory(jpeg_bytes).context("Failed to decode JPEG preview image")?;
     Ok(img)
+}
+
+// =============================================================================
+// Decode-once analysis image
+//
+// Embedded RAW previews are often full-size (24 MP+). Decoding and processing
+// them at full size in every stage made the pipeline ~2.7 s/image. Instead we
+// decode each preview ONCE into two sizes and share them across all stages:
+//   - `work`  : 1/2 scale for large previews — keeps eye detail for focus/blink
+//   - `small` : ≤ 640 px long edge — all that pHash and YOLO (640×640) need
+// =============================================================================
+
+/// Longest edge (px) of the `small` copy. YOLO's input is 640×640, so a larger
+/// copy would only be shrunk again.
+pub const SMALL_LONG_EDGE: u32 = 640;
+
+/// Previews with a long edge of at least this many pixels are decoded at
+/// 1/2 scale (e.g. 6000×4000 → 3000×2000); smaller ones at full size.
+pub const HALF_SCALE_MIN_LONG_EDGE: u32 = 4000;
+
+/// One preview, decoded once and shared by every analysis stage.
+pub struct AnalysisImage {
+    /// Size of the original embedded preview. Bounding boxes stored in
+    /// `ImageScore` use this coordinate space (the loupe zooms on it).
+    pub preview_width: u32,
+    pub preview_height: u32,
+    /// Working image for focus scoring and blink detection.
+    pub work: DynamicImage,
+    /// Small copy (≤ `SMALL_LONG_EDGE`) for pHash and face detection.
+    pub small: DynamicImage,
+}
+
+impl AnalysisImage {
+    /// Multiply `work` coordinates by this to get preview coordinates.
+    pub fn work_to_preview(&self) -> f32 {
+        self.preview_width as f32 / self.work.width() as f32
+    }
+
+    /// Multiply `small` coordinates by this to get preview coordinates.
+    pub fn small_to_preview(&self) -> f32 {
+        self.preview_width as f32 / self.small.width() as f32
+    }
+}
+
+/// Decodes a JPEG preview once into an [`AnalysisImage`].
+///
+/// Uses `jpeg-decoder`'s IDCT scaling for a cheap 1/2-scale decode; falls back
+/// to a full decode via the `image` crate for anything it can't handle
+/// (e.g. CMYK or 16-bit JPEGs).
+pub fn decode_for_analysis(jpeg_bytes: &[u8]) -> Result<AnalysisImage> {
+    let (preview_width, preview_height, work) = match decode_scaled(jpeg_bytes) {
+        Some(decoded) => decoded,
+        None => {
+            let img = decode_jpeg(jpeg_bytes)?;
+            (img.width(), img.height(), img)
+        }
+    };
+
+    let small = if work.width().max(work.height()) > SMALL_LONG_EDGE {
+        // `thumbnail` is a fast area-averaging downscale — ~4× cheaper than
+        // a Triangle-filter resize on these sizes.
+        work.thumbnail(SMALL_LONG_EDGE, SMALL_LONG_EDGE)
+    } else {
+        work.clone()
+    };
+
+    debug!(
+        "Decoded preview {}x{} → work {}x{}, small {}x{}",
+        preview_width,
+        preview_height,
+        work.width(),
+        work.height(),
+        small.width(),
+        small.height()
+    );
+
+    Ok(AnalysisImage {
+        preview_width,
+        preview_height,
+        work,
+        small,
+    })
+}
+
+/// Returns `(preview_width, preview_height, decoded image)`, or `None` if
+/// `jpeg-decoder` can't produce an 8-bit RGB or greyscale image.
+fn decode_scaled(jpeg_bytes: &[u8]) -> Option<(u32, u32, DynamicImage)> {
+    let mut decoder = jpeg_decoder::Decoder::new(jpeg_bytes);
+    decoder.read_info().ok()?;
+    let info = decoder.info()?;
+    let (preview_width, preview_height) = (info.width as u32, info.height as u32);
+
+    let (out_w, out_h) = if preview_width.max(preview_height) >= HALF_SCALE_MIN_LONG_EDGE {
+        // `scale` picks the smallest of 1/8, 1/4, 1/2, 1 that is ≥ the request.
+        decoder.scale(info.width / 2, info.height / 2).ok()?
+    } else {
+        (info.width, info.height)
+    };
+
+    let pixels = decoder.decode().ok()?;
+    let (w, h) = (out_w as u32, out_h as u32);
+
+    let image = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => {
+            DynamicImage::ImageRgb8(RgbImage::from_raw(w, h, pixels)?)
+        }
+        jpeg_decoder::PixelFormat::L8 => {
+            DynamicImage::ImageLuma8(GrayImage::from_raw(w, h, pixels)?)
+        }
+        _ => return None,
+    };
+
+    Some((preview_width, preview_height, image))
+}
+
+/// Scales a bounding box by `factor` (e.g. from `small` to preview coordinates).
+pub fn scale_bbox(bbox: &BoundingBox, factor: f32) -> BoundingBox {
+    BoundingBox {
+        x: bbox.x * factor,
+        y: bbox.y * factor,
+        width: bbox.width * factor,
+        height: bbox.height * factor,
+    }
 }
 
 pub fn resize_image(img: &DynamicImage, width: u32, height: u32) -> DynamicImage {
@@ -111,4 +235,60 @@ impl LetterboxTransform {
 
 pub fn image_to_yolo_tensor(img: &DynamicImage) -> Array4<f32> {
     image_to_nchw_tensor(img, SIMPLE_MEAN, SIMPLE_STD)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::codecs::jpeg::JpegEncoder;
+
+    fn jpeg_of_size(w: u32, h: u32) -> Vec<u8> {
+        let img = RgbImage::from_fn(w, h, |x, y| Rgb([(x % 256) as u8, (y % 256) as u8, 128]));
+        let mut bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut bytes, 90)
+            .encode_image(&img)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn test_large_preview_decodes_at_half_scale() {
+        let decoded = decode_for_analysis(&jpeg_of_size(4800, 3200)).unwrap();
+        assert_eq!(
+            (decoded.preview_width, decoded.preview_height),
+            (4800, 3200)
+        );
+        assert_eq!((decoded.work.width(), decoded.work.height()), (2400, 1600));
+        assert_eq!(
+            decoded.small.width().max(decoded.small.height()),
+            SMALL_LONG_EDGE
+        );
+        assert!((decoded.work_to_preview() - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_small_preview_decodes_at_full_size() {
+        let decoded = decode_for_analysis(&jpeg_of_size(1600, 1067)).unwrap();
+        assert_eq!((decoded.work.width(), decoded.work.height()), (1600, 1067));
+        assert!((decoded.work_to_preview() - 1.0).abs() < 1e-6);
+        assert!(decoded.small.width() <= SMALL_LONG_EDGE);
+    }
+
+    #[test]
+    fn test_tiny_preview_is_not_upscaled() {
+        let decoded = decode_for_analysis(&jpeg_of_size(320, 240)).unwrap();
+        assert_eq!((decoded.small.width(), decoded.small.height()), (320, 240));
+    }
+
+    #[test]
+    fn test_scale_bbox() {
+        let b = BoundingBox {
+            x: 10.0,
+            y: 20.0,
+            width: 30.0,
+            height: 40.0,
+        };
+        let s = scale_bbox(&b, 2.0);
+        assert_eq!((s.x, s.y, s.width, s.height), (20.0, 40.0, 60.0, 80.0));
+    }
 }

@@ -6,7 +6,7 @@
 //!
 //! Usage:
 //!   keeper-bench [--input <dir>] [--runs <n>] [--warmup]
-//!                [--models <dir>] [--raw]
+//!                [--models <dir>] [--raw] [--manifest <file>]
 //!
 //!   --input <dir>   Folder of images to benchmark (default: test-data)
 //!   --runs <n>      Number of timed pipeline runs (default: 3)
@@ -14,6 +14,8 @@
 //!   --models <dir>  Directory holding the ONNX models (default: models)
 //!   --raw           Treat input as RAW files and ingest via ExifTool.
 //!                   Default treats input files as JPEG previews directly.
+//!   --manifest <file>  Write the last run's CullManifest plus an id → file
+//!                   name map as JSON, to compare verdicts between versions.
 
 use anyhow::{Context, Result};
 use keeper_core::config::CullConfig;
@@ -31,6 +33,7 @@ struct Args {
     runs: usize,
     warmup: bool,
     raw: bool,
+    manifest_out: Option<PathBuf>,
 }
 
 fn parse_args() -> Args {
@@ -57,6 +60,7 @@ fn parse_args() -> Args {
         runs,
         warmup: argv.iter().any(|a| a == "--warmup"),
         raw: argv.iter().any(|a| a == "--raw"),
+        manifest_out: value_after("--manifest").map(PathBuf::from),
     }
 }
 
@@ -188,8 +192,6 @@ fn main() -> Result<()> {
     let (min, avg, max) = stats(&wall_times);
     let avg_reported = reported_secs.iter().sum::<f64>() / reported_secs.len() as f64;
     let per_image_ms = avg.as_secs_f64() * 1000.0 / images.len() as f64;
-    // Full run includes stacking internally; isolate the vision share.
-    let vision_share = avg.as_secs_f64() - stack_elapsed.as_secs_f64();
 
     println!("═══════════════════════════════════════════");
     println!("  RESULTS");
@@ -203,11 +205,10 @@ fn main() -> Result<()> {
     println!();
     println!("Model load:        {}", fmt_duration(init_elapsed));
     println!("Image load:        {}", fmt_duration(load_elapsed));
-    println!("Stacking:          {}", fmt_duration(stack_elapsed));
-    println!(
-        "Vision (≈run-stack): {}",
-        fmt_duration(Duration::from_secs_f64(vision_share.max(0.0)))
-    );
+    // Standalone stacking decodes previews itself; inside the pipeline it
+    // reuses hashes computed during analysis, so it is not part of the run
+    // time below in the same way.
+    println!("Stacking (standalone): {}", fmt_duration(stack_elapsed));
     println!();
     println!("Pipeline wall time ({} runs):", wall_times.len());
     println!("  min: {}", fmt_duration(min));
@@ -221,6 +222,18 @@ fn main() -> Result<()> {
         1000.0 / per_image_ms
     );
     println!("═══════════════════════════════════════════");
+
+    // ── Optional manifest dump ─────────────────────────────────────────────
+    if let Some(path) = &args.manifest_out {
+        let files: std::collections::BTreeMap<u64, &str> = images
+            .iter()
+            .map(|img| (img.id, img.file_name.as_str()))
+            .collect();
+        let json = serde_json::json!({ "files": files, "manifest": manifest });
+        std::fs::write(path, serde_json::to_string_pretty(&json)?)
+            .with_context(|| format!("Failed to write manifest to {:?}", path))?;
+        println!("Manifest written to {:?}", path);
+    }
 
     Ok(())
 }

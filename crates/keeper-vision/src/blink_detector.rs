@@ -49,8 +49,18 @@ impl BlinkDetector {
     ) -> Result<BlinkResult> {
         let img =
             preprocess::decode_jpeg(jpeg_bytes).context("Blink detector: failed to decode JPEG")?;
+        self.detect_blink_image(&img, face_bbox, ear_threshold)
+    }
 
-        let face_crop = self.crop_face_with_margin(&img, face_bbox);
+    /// Same as [`detect_blink`](Self::detect_blink) on an already-decoded
+    /// image. `face_bbox` must be in `img`'s pixel coordinates.
+    pub fn detect_blink_image(
+        &mut self,
+        img: &image::DynamicImage,
+        face_bbox: &BoundingBox,
+        ear_threshold: f64,
+    ) -> Result<BlinkResult> {
+        let face_crop = self.crop_face_with_margin(img, face_bbox);
 
         let resized = preprocess::resize_image(&face_crop, self.input_size, self.input_size);
 

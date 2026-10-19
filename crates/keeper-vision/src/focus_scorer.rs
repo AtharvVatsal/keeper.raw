@@ -22,10 +22,18 @@ pub fn score_sharpness(jpeg_bytes: &[u8], face_bbox: Option<&BoundingBox>) -> Re
     let img = preprocess::decode_jpeg(jpeg_bytes).context("Focus scorer: failed to decode JPEG")?;
 
     let gray = img.to_luma8();
+    score_sharpness_gray(&gray, face_bbox)
+}
 
+/// Same as [`score_sharpness`] on an already-decoded greyscale image.
+/// `face_bbox` must be in `gray`'s pixel coordinates.
+pub fn score_sharpness_gray(
+    gray: &image::GrayImage,
+    face_bbox: Option<&BoundingBox>,
+) -> Result<FocusResult> {
     match face_bbox {
-        Some(bbox) => score_eye_region(&gray, bbox),
-        None => score_center_region(&gray),
+        Some(bbox) => score_eye_region(gray, bbox),
+        None => score_center_region(gray),
     }
 }
 
@@ -168,29 +176,35 @@ fn estimate_noise(gray: &image::GrayImage) -> f64 {
         return 1.0;
     }
 
+    // Pixel values of one patch, in row order. Computed on the fly so we don't
+    // allocate a Vec for each of the (tens of thousands of) patches.
+    let patch = |px: usize, py: usize| {
+        (py..py + patch_size)
+            .flat_map(move |y| (px..px + patch_size).map(move |x| pixels[y * w + x] as f64))
+    };
+    let n = (patch_size * patch_size) as f64;
+
     let mut min_std = f64::MAX;
-    let mut flattest_patch: Vec<f64> = Vec::new();
+    let mut flattest: Option<(usize, usize)> = None;
 
     for py in (0..h - patch_size).step_by(patch_size) {
         for px in (0..w - patch_size).step_by(patch_size) {
-            let mut patch_vals: Vec<f64> = Vec::with_capacity(patch_size * patch_size);
-            for y in py..py + patch_size {
-                for x in px..px + patch_size {
-                    patch_vals.push(pixels[y * w + x] as f64);
-                }
-            }
-
-            let std_dev = compute_std_dev(&patch_vals);
+            // Two-pass standard deviation, summed in the same order as before
+            // so results are bit-for-bit identical.
+            let mean = patch(px, py).sum::<f64>() / n;
+            let variance = patch(px, py).map(|v| (v - mean).powi(2)).sum::<f64>() / n;
+            let std_dev = variance.sqrt();
             if std_dev < min_std {
                 min_std = std_dev;
-                flattest_patch = patch_vals;
+                flattest = Some((px, py));
             }
         }
     }
 
-    if flattest_patch.is_empty() {
+    let Some((fx, fy)) = flattest else {
         return 1.0;
-    }
+    };
+    let flattest_patch: Vec<f64> = patch(fx, fy).collect();
 
     let median = compute_median(&flattest_patch);
     let abs_deviations: Vec<f64> = flattest_patch.iter().map(|v| (v - median).abs()).collect();
@@ -199,16 +213,6 @@ fn estimate_noise(gray: &image::GrayImage) -> f64 {
     let noise_sigma = 1.4826 * mad;
 
     noise_sigma.max(0.1)
-}
-
-fn compute_std_dev(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let n = values.len() as f64;
-    let mean: f64 = values.iter().sum::<f64>() / n;
-    let variance: f64 = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
-    variance.sqrt()
 }
 
 fn compute_median(values: &[f64]) -> f64 {
@@ -357,5 +361,70 @@ mod tests {
         let scores: Vec<(u64, FocusResult)> = vec![];
         let keeper = pick_keeper(&scores);
         assert_eq!(keeper, None);
+    }
+
+    /// The original (allocating) noise estimator, kept as a reference to prove
+    /// the optimised version returns exactly the same value.
+    fn estimate_noise_reference(gray: &image::GrayImage) -> f64 {
+        let (w, h) = (gray.width() as usize, gray.height() as usize);
+        let pixels = gray.as_raw();
+        let patch_size = 16;
+        if w < patch_size || h < patch_size {
+            return 1.0;
+        }
+        let mut min_std = f64::MAX;
+        let mut flattest_patch: Vec<f64> = Vec::new();
+        for py in (0..h - patch_size).step_by(patch_size) {
+            for px in (0..w - patch_size).step_by(patch_size) {
+                let mut vals = Vec::with_capacity(patch_size * patch_size);
+                for y in py..py + patch_size {
+                    for x in px..px + patch_size {
+                        vals.push(pixels[y * w + x] as f64);
+                    }
+                }
+                let n = vals.len() as f64;
+                let mean: f64 = vals.iter().sum::<f64>() / n;
+                let std = (vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n).sqrt();
+                if std < min_std {
+                    min_std = std;
+                    flattest_patch = vals;
+                }
+            }
+        }
+        if flattest_patch.is_empty() {
+            return 1.0;
+        }
+        let median = compute_median(&flattest_patch);
+        let devs: Vec<f64> = flattest_patch.iter().map(|v| (v - median).abs()).collect();
+        (1.4826 * compute_median(&devs)).max(0.1)
+    }
+
+    #[test]
+    fn test_estimate_noise_matches_reference_on_noise() {
+        // Deterministic pseudo-random noise (simple LCG) over a gradient.
+        let mut seed: u32 = 12345;
+        let img = image::GrayImage::from_fn(333, 217, |x, _| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            image::Luma([(x / 2 + (seed >> 28)).min(255) as u8])
+        });
+        assert_eq!(
+            estimate_noise(&img).to_bits(),
+            estimate_noise_reference(&img).to_bits()
+        );
+    }
+
+    #[test]
+    fn test_estimate_noise_matches_reference_on_photo() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/face-photo.JPG");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("SKIPPED: face-photo.JPG not found");
+            return;
+        };
+        let gray = image::load_from_memory(&bytes).unwrap().to_luma8();
+        assert_eq!(
+            estimate_noise(&gray).to_bits(),
+            estimate_noise_reference(&gray).to_bits()
+        );
     }
 }

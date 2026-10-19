@@ -37,8 +37,19 @@ impl FaceDetector {
     ) -> Result<Vec<FaceDetection>> {
         let img =
             preprocess::decode_jpeg(jpeg_bytes).context("Face detector: failed to decode JPEG")?;
+        self.detect_image(&img, confidence_threshold, iou_threshold)
+    }
 
-        let (padded, transform) = preprocess::letterbox(&img, self.input_size, self.input_size);
+    /// Same as [`detect`](Self::detect) on an already-decoded image. Boxes are
+    /// returned in `img`'s pixel coordinates. Passing a small (≤ 640 px) copy
+    /// avoids an expensive full-resolution letterbox resize.
+    pub fn detect_image(
+        &mut self,
+        img: &image::DynamicImage,
+        confidence_threshold: f32,
+        iou_threshold: f32,
+    ) -> Result<Vec<FaceDetection>> {
+        let (padded, transform) = preprocess::letterbox(img, self.input_size, self.input_size);
 
         let tensor: Array4<f32> = preprocess::image_to_yolo_tensor(&padded);
 
