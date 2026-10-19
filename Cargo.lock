@@ -2289,6 +2289,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "keeper-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "keeper-core",
+ "keeper-ingest",
+ "keeper-stacker",
+ "keeper-vision",
+]
+
+[[package]]
 name = "keeper-core"
 version = "0.1.0"
 dependencies = [

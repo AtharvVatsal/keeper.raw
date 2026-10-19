@@ -1,0 +1,17 @@
+[package]
+name = "keeper-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Pipeline benchmarking harness for keeper.raw"
+
+[[bin]]
+name = "keeper-bench"
+path = "src/main.rs"
+
+[dependencies]
+keeper-core = { path = "../keeper-core" }
+keeper-ingest = { path = "../keeper-ingest" }
+keeper-stacker = { path = "../keeper-stacker" }
+keeper-vision = { path = "../keeper-vision" }
+
+anyhow = { workspace = true }

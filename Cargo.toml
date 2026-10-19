@@ -7,6 +7,7 @@ members = [
     "crates/keeper-stacker",
     "crates/keeper-vision",
     "crates/keeper-xmp",
+    "crates/keeper-bench",
 ]
 
 [workspace.dependencies]
