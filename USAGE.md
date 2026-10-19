@@ -57,7 +57,7 @@ The AI will:
 1. **Group photos** into scenes (bursts taken together)
 2. **Detect faces** in each photo
 3. **Analyze sharpness** using Laplacian variance
-4. **Detect blinks** using Eye Aspect Ratio
+4. **Detect blinks** using MediaPipe's eye-blink scores (only clear blinks are rejected)
 5. **Select keepers** based on sharpness and blink status
 
 The button shows "Culling... (this takes a while)" until the analysis finishes. There is no per-image progress indicator yet.

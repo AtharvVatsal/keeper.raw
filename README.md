@@ -26,7 +26,7 @@ No cloud. No subscription. No internet required.
 | **Instant Ingest** | Extracts embedded JPEG previews from RAW files — no full decode, no waiting. Supports CR2, CR3, NEF, ARW, RAF, DNG, ORF, RW2. |
 | **Smart Stacking** | Groups burst shots into Scenes using timestamp clustering and perceptual hashing. |
 | **Tack-Sharp Detection** | Finds the sharpest image in each Scene using eye-region focus scoring with noise-aware normalization. |
-| **ZeroBlink Filter** | Detects blinks using facial landmark analysis (Eye Aspect Ratio). Blinkers get flagged automatically. |
+| **ZeroBlink Filter** | Detects closed eyes with MediaPipe's eye-blink model. Only clear blinks are rejected — unsure faces are never thrown out. |
 | **One-Click Override** | Keyboard shortcuts to override any AI decision: K (keep), X (reject), U (unrate). |
 | **XMP Export** | Writes industry-standard `.xmp` sidecar files. Ratings appear instantly in Lightroom, Darktable, and Capture One. |
 | **100% Offline** | All AI runs locally on your CPU. No accounts, no uploads, no data harvesting. |
@@ -63,7 +63,7 @@ keeper.raw runs a multi-stage computer vision pipeline entirely on your local CP
 2. **Stack** — Images are grouped into Scenes by timestamp proximity, then sub-split by perceptual hash to catch composition changes
 3. **Detect** — YOLOv8-nano (ONNX) locates faces in each preview
 4. **Score** — Variance of Laplacian measures sharpness on the detected eye region, normalized for sensor noise
-5. **Flag** — MediaPipe Face Mesh computes the Eye Aspect Ratio; if both eyes are below threshold, the image is flagged as a blink
+5. **Flag** — MediaPipe FaceMesh V2 + Blendshapes score how closed each eye is; when the model is confident and both eyes are closed, the image is rejected as a blink. Black or blank frames are rejected too
 6. **Rank** — The sharpest non-blink image in each Scene becomes the Keeper
 
 All ML models run in ONNX format via ONNX Runtime on your CPU.
@@ -93,7 +93,7 @@ cd keeper.raw
 npm install
 
 # Download the ONNX models (see models/readme.md)
-# Place yolov8n-face.onnx and face_landmark.onnx in the models/ directory
+# Place yolov8n-face.onnx, face_landmarks_detector.onnx and face_blendshapes.onnx in models/
 
 # Run in development mode
 cargo tauri dev

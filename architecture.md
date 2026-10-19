@@ -84,15 +84,16 @@ Image → Face Detection → Focus Scoring → Blink Detection → ImageScore
 - Formula: `sharpness = variance(laplacian(gray)) / noise_estimate`
 
 **Stage 3: Blink Detection**
-- Model: FaceMesh (ONNX) - 468 facial landmarks
-- Metric: Eye Aspect Ratio (EAR)
-- Threshold: EAR < 0.21 indicates blink
+- Models: MediaPipe FaceMesh V2 (478 landmarks) + Blendshape V2 (ONNX, Apache-2.0)
+- Square face crop (25% margin) levelled by the eye keypoints, then a second pass re-centred on the landmarks and levelled on the iris centres
+- Metric: `eyeBlinkLeft` / `eyeBlinkRight` scores (0 = open, 1 = closed)
+- Rule: reject only if FaceMesh face confidence ≥ 0.5 and both eyes ≥ `blink_threshold` (default 0.40)
 
 **Key files:**
 - `crates/keeper-vision/src/pipeline.rs` - Pipeline orchestration
 - `crates/keeper-vision/src/face_detector.rs` - YOLOv8-face wrapper
 - `crates/keeper-vision/src/focus_scorer.rs` - Sharpness analysis
-- `crates/keeper-vision/src/blink_detector.rs` - EAR computation
+- `crates/keeper-vision/src/blink_detector.rs` - FaceMesh V2 + blendshape blink scores
 - `crates/keeper-vision/src/preprocess.rs` - Image preprocessing
 
 ### 4. Keeper Selection

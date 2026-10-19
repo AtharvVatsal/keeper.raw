@@ -36,7 +36,7 @@ npm install
 The ML models are not included in the Git repo (they're too large). Download them:
 
 1. Go to the [Releases page](https://github.com/AtharvVatsal/keeper.raw/releases) and find the "Model Files" asset
-2. Download `yolov8n-face.onnx` and `face_landmark.onnx`
+2. Download `yolov8n-face.onnx`, `face_landmarks_detector.onnx` and `face_blendshapes.onnx`
 3. Place both files in the `models/` directory at the project root
 
 Or follow the instructions in `models/readme.md` to export them yourself.

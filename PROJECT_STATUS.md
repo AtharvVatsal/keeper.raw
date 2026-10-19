@@ -40,7 +40,7 @@ The app is a Tauri v2 shell with a React/TypeScript frontend. Behind it is a Rus
    - Everything runs through ONNX Runtime via `ort 2.0.0-rc.12`.
    - **Face detection:** YOLOv8-nano, with letterbox preprocessing and non-maximum suppression (NMS).
    - **Focus scoring:** Variance of Laplacian on the eye region, divided by a noise floor (MAD on a flat patch) so high-ISO noise doesn't look like sharpness. Frames with no face are scored on the centre of the frame.
-   - **Blink detection:** MediaPipe Face Mesh landmarks feed an Eye Aspect Ratio; EAR below `0.21` means reject.
+   - **Blink detection:** MediaPipe FaceMesh V2 + Blendshape V2 eye-blink scores (replaced an Eye Aspect Ratio heuristic in October 2026). A shot is rejected only when the model is confident it sees a face and both eyes score as closed (≥ 0.40).
    - **Orchestration:** `CullPipeline` runs all of this and emits a JSON manifest.
 
 4. **Export (`keeper-xmp`)**
