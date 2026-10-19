@@ -108,6 +108,7 @@ fn main() -> Result<()> {
             keeper_core::types::Verdict::Reject { reason } => match reason {
                 keeper_core::types::RejectReason::Blink => "❌ REJECT (blink)",
                 keeper_core::types::RejectReason::OutOfFocus => "❌ REJECT (blur)",
+                keeper_core::types::RejectReason::Unusable => "❌ REJECT (unusable)",
             },
             keeper_core::types::Verdict::Unrated => "   unrated",
         };

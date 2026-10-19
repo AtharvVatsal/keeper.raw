@@ -73,6 +73,9 @@ pub enum Verdict {
 pub enum RejectReason {
     Blink,
     OutOfFocus,
+    /// Nothing usable in the frame: black (lens cap, misfire) or blank
+    /// (featureless wall, out-of-focus mush). Never chosen as a keeper.
+    Unusable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

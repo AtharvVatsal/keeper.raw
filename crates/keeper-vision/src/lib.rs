@@ -8,4 +8,5 @@ pub mod face_detector;
 pub mod focus_scorer;
 pub mod pipeline;
 pub mod preprocess;
+pub mod quality;
 pub mod runtime;

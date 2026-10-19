@@ -13,6 +13,7 @@ use crate::blink_detector::BlinkDetector;
 use crate::face_detector::{FaceDetection, FaceDetector};
 use crate::focus_scorer;
 use crate::preprocess;
+use crate::quality;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CullManifest {
@@ -103,9 +104,11 @@ impl CullPipeline {
         info!("Stage 3/3: Selecting keepers...");
 
         for scene in &mut scenes {
+            // Unusable (black/blank) frames can never be a keeper.
             let scene_scores: Vec<(u64, focus_scorer::FocusResult)> = scene
                 .image_ids
                 .iter()
+                .filter(|id| score_map.get(id).map(|s| !is_unusable(s)).unwrap_or(true))
                 .filter_map(|id| {
                     score_map.get(id).map(|score| {
                         (
@@ -146,6 +149,9 @@ impl CullPipeline {
             scenes.iter().filter_map(|s| s.keeper_id).collect();
 
         for score in &mut final_scores {
+            if is_unusable(score) {
+                continue; // keep its Reject { Unusable } verdict
+            }
             if keeper_ids.contains(&score.image_id) {
                 score.verdict = Verdict::Keeper;
             } else if score.blink_detected {
@@ -223,6 +229,20 @@ impl CullPipeline {
         // ---- pHash (on the small copy) --------------------------------------
         let phash = hasher::compute_phash_image(&decoded.small);
 
+        // ---- Unusable frame? (black / blank) ----------------------------------
+        // Rejected outright and never chosen as a keeper; no point running
+        // face, focus or blink analysis on it.
+        if quality::is_unusable(&decoded.small) {
+            debug!("'{}' is unusable (black or blank frame)", image.file_name);
+            let score = ImageScore {
+                verdict: Verdict::Reject {
+                    reason: RejectReason::Unusable,
+                },
+                ..unscored
+            };
+            return (score, Some(phash));
+        }
+
         // ---- Face detection (on the small copy) -----------------------------
         let faces = {
             let mut detector = self.face_detector.lock().unwrap();
@@ -291,6 +311,16 @@ impl CullPipeline {
         };
         (score, Some(phash))
     }
+}
+
+/// True if analysis already rejected this image as a black/blank frame.
+fn is_unusable(score: &ImageScore) -> bool {
+    matches!(
+        score.verdict,
+        Verdict::Reject {
+            reason: RejectReason::Unusable
+        }
+    )
 }
 
 /// Head roll in radians from the two eye keypoints (0 if they're missing).
