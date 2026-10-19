@@ -22,12 +22,12 @@ fn test_mobilenet_loads_and_runs() -> Result<()> {
     println!("   Outputs: {:?}", model.output_names());
 
     let test_image_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/test-photo.jpg");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/test-photo.JPG");
 
     if !test_image_path.exists() {
         eprintln!(
             "SKIPPED: Test image not found at {:?}. \
-             Place any .jpg file at test-data/test-photo.jpg.",
+             Place any .jpg file at test-data/test-photo.JPG.",
             test_image_path
         );
         return Ok(());

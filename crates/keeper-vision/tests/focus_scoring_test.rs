@@ -31,10 +31,10 @@ fn test_focus_score_with_face_detection() -> Result<()> {
         Some(p) => p,
         None => return Ok(()),
     };
-    let jpeg_bytes = match get_test_image("face-photo.jpg") {
+    let jpeg_bytes = match get_test_image("face-photo.JPG") {
         Some(b) => b,
         None => {
-            eprintln!("SKIPPED: face-photo.jpg not found");
+            eprintln!("SKIPPED: face-photo.JPG not found");
             return Ok(());
         }
     };
@@ -70,10 +70,10 @@ fn test_focus_score_with_face_detection() -> Result<()> {
 
 #[test]
 fn test_focus_score_without_face() -> Result<()> {
-    let jpeg_bytes = match get_test_image("no-face-photo.jpg") {
+    let jpeg_bytes = match get_test_image("no-face-photo.JPG") {
         Some(b) => b,
         None => {
-            eprintln!("SKIPPED: no-face-photo.jpg not found");
+            eprintln!("SKIPPED: no-face-photo.JPG not found");
             return Ok(());
         }
     };
@@ -94,11 +94,11 @@ fn test_focus_score_without_face() -> Result<()> {
 
 #[test]
 fn test_focus_score_comparison() -> Result<()> {
-    let sharp = get_test_image("sharp-portrait.jpg");
-    let soft = get_test_image("soft-portrait.jpg");
+    let sharp = get_test_image("sharp-portrait.JPG");
+    let soft = get_test_image("soft-portrait.JPG");
 
     if sharp.is_none() || soft.is_none() {
-        eprintln!("SKIPPED: Need sharp-portrait.jpg and soft-portrait.jpg in test-data/");
+        eprintln!("SKIPPED: Need sharp-portrait.JPG and soft-portrait.JPG in test-data/");
         return Ok(());
     }
 
@@ -122,10 +122,10 @@ fn test_focus_score_comparison() -> Result<()> {
 
 #[test]
 fn test_focus_scoring_performance() -> Result<()> {
-    let jpeg_bytes = match get_test_image("face-photo.jpg") {
+    let jpeg_bytes = match get_test_image("face-photo.JPG") {
         Some(b) => b,
         None => {
-            eprintln!("SKIPPED: face-photo.jpg not found");
+            eprintln!("SKIPPED: face-photo.JPG not found");
             return Ok(());
         }
     };

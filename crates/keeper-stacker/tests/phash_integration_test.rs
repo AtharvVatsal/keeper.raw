@@ -35,11 +35,11 @@ fn load_test_image(id: u64, filename: &str, timestamp_ms: i64) -> Option<ImageRe
 
 #[test]
 fn test_phash_similar_images_have_low_distance() -> Result<()> {
-    let img_a_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/burst_a_01.jpg");
-    let img_b_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/burst_a_02.jpg");
+    let img_a_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/burst_a_01.JPG");
+    let img_b_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/burst_a_02.JPG");
 
     if !img_a_path.exists() || !img_b_path.exists() {
-        eprintln!("SKIPPED: Need burst_a_01.jpg and burst_a_02.jpg in test-data/");
+        eprintln!("SKIPPED: Need burst_a_01.JPG and burst_a_02.JPG in test-data/");
         return Ok(());
     }
 
@@ -63,12 +63,12 @@ fn test_phash_similar_images_have_low_distance() -> Result<()> {
 
 #[test]
 fn test_phash_different_images_have_high_distance() -> Result<()> {
-    let img_a_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/burst_a_01.jpg");
+    let img_a_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/burst_a_01.JPG");
     let img_diff_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/burst_b_01.jpg");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/burst_b_01.JPG");
 
     if !img_a_path.exists() || !img_diff_path.exists() {
-        eprintln!("SKIPPED: Need burst_a_01.jpg and burst_b_01.jpg in test-data/");
+        eprintln!("SKIPPED: Need burst_a_01.JPG and burst_b_01.JPG in test-data/");
         return Ok(());
     }
 
@@ -92,12 +92,12 @@ fn test_phash_different_images_have_high_distance() -> Result<()> {
 
 #[test]
 fn test_stacking_splits_mixed_burst_by_phash() -> Result<()> {
-    let img_a1 = load_test_image(1, "burst_a_01.jpg", 1000);
-    let img_a2 = load_test_image(2, "burst_a_02.jpg", 1200);
-    let img_b1 = load_test_image(3, "burst_b_01.jpg", 1400);
+    let img_a1 = load_test_image(1, "burst_a_01.JPG", 1000);
+    let img_a2 = load_test_image(2, "burst_a_02.JPG", 1200);
+    let img_b1 = load_test_image(3, "burst_b_01.JPG", 1400);
 
     if img_a1.is_none() || img_a2.is_none() || img_b1.is_none() {
-        eprintln!("SKIPPED: Need burst_a_01.jpg, burst_a_02.jpg, burst_b_01.jpg in test-data/");
+        eprintln!("SKIPPED: Need burst_a_01.JPG, burst_a_02.JPG, burst_b_01.JPG in test-data/");
         return Ok(());
     }
 
@@ -111,13 +111,14 @@ fn test_stacking_splits_mixed_burst_by_phash() -> Result<()> {
         println!("  Scene {}: {:?}", scene.id, scene.image_ids);
     }
 
-    if scenes.len() == 2 {
-        println!("pHash correctly split the mixed burst into 2 scenes");
-    } else if scenes.len() == 1 {
-        println!("pHash did NOT split - test images may be too similar");
-    } else {
-        println!("Got {} scenes - unexpected", scenes.len());
-    }
+    // All three shots fall inside one time cluster (200 ms apart), so any
+    // split here comes from pHash: burst_b_01 is a different composition.
+    let groups: Vec<Vec<u64>> = scenes.iter().map(|s| s.image_ids.clone()).collect();
+    assert_eq!(
+        groups,
+        vec![vec![1, 2], vec![3]],
+        "pHash should split burst_b_01 away from burst_a_01/02"
+    );
 
     Ok(())
 }

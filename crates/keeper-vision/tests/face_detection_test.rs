@@ -45,7 +45,7 @@ fn test_detect_faces_in_portrait() -> Result<()> {
         Some(p) => p,
         None => return Ok(()),
     };
-    let jpeg_bytes = match get_test_image("face-photo.jpg") {
+    let jpeg_bytes = match get_test_image("face-photo.JPG") {
         Some(b) => b,
         None => return Ok(()),
     };
@@ -53,7 +53,7 @@ fn test_detect_faces_in_portrait() -> Result<()> {
     let mut detector = FaceDetector::new(&model_path)?;
     let detections = detector.detect(&jpeg_bytes, 0.5, 0.45)?;
 
-    println!("Found {} face(s) in face-photo.jpg:", detections.len());
+    println!("Found {} face(s) in face-photo.JPG:", detections.len());
     for (i, det) in detections.iter().enumerate() {
         println!(
             "  Face {}: confidence={:.3}, bbox=({:.0}, {:.0}, {:.0}x{:.0})",
@@ -68,7 +68,7 @@ fn test_detect_faces_in_portrait() -> Result<()> {
 
     assert!(
         !detections.is_empty(),
-        "Expected at least 1 face in face-photo.jpg, found 0"
+        "Expected at least 1 face in face-photo.JPG, found 0"
     );
 
     assert!(
@@ -89,7 +89,7 @@ fn test_no_false_positives_in_landscape() -> Result<()> {
         Some(p) => p,
         None => return Ok(()),
     };
-    let jpeg_bytes = match get_test_image("no-face-photo.jpg") {
+    let jpeg_bytes = match get_test_image("no-face-photo.JPG") {
         Some(b) => b,
         None => return Ok(()),
     };
@@ -98,7 +98,7 @@ fn test_no_false_positives_in_landscape() -> Result<()> {
     let detections = detector.detect(&jpeg_bytes, 0.5, 0.45)?;
 
     println!(
-        "Found {} face(s) in no-face-photo.jpg (expected 0)",
+        "Found {} face(s) in no-face-photo.JPG (expected 0)",
         detections.len()
     );
     for det in &detections {
@@ -117,7 +117,7 @@ fn test_face_detection_performance() -> Result<()> {
         Some(p) => p,
         None => return Ok(()),
     };
-    let jpeg_bytes = match get_test_image("face-photo.jpg") {
+    let jpeg_bytes = match get_test_image("face-photo.JPG") {
         Some(b) => b,
         None => return Ok(()),
     };

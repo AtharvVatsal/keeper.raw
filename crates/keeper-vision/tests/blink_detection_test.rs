@@ -57,10 +57,10 @@ fn test_blink_detection_on_portrait() -> Result<()> {
         Some(p) => p,
         None => return Ok(()),
     };
-    let jpeg_bytes = match get_test_image("face-photo.jpg") {
+    let jpeg_bytes = match get_test_image("face-photo.JPG") {
         Some(b) => b,
         None => {
-            eprintln!("SKIPPED: face-photo.jpg not found");
+            eprintln!("SKIPPED: face-photo.JPG not found");
             return Ok(());
         }
     };
@@ -69,7 +69,7 @@ fn test_blink_detection_on_portrait() -> Result<()> {
     let faces = face_detector.detect(&jpeg_bytes, 0.5, 0.45)?;
 
     if faces.is_empty() {
-        eprintln!("No faces detected in face-photo.jpg — can't test blink detection");
+        eprintln!("No faces detected in face-photo.JPG — can't test blink detection");
         return Ok(());
     }
 
@@ -112,10 +112,10 @@ fn test_blink_detection_performance() -> Result<()> {
         Some(p) => p,
         None => return Ok(()),
     };
-    let jpeg_bytes = match get_test_image("face-photo.jpg") {
+    let jpeg_bytes = match get_test_image("face-photo.JPG") {
         Some(b) => b,
         None => {
-            eprintln!("SKIPPED: face-photo.jpg not found");
+            eprintln!("SKIPPED: face-photo.JPG not found");
             return Ok(());
         }
     };

@@ -55,16 +55,16 @@ fn test_pipeline_with_burst_grouping() -> Result<()> {
         None => return Ok(()),
     };
 
-    let face_jpg = match load_test_jpeg("face-photo.jpg") {
+    let face_jpg = match load_test_jpeg("face-photo.JPG") {
         Some(b) => b,
         None => {
-            eprintln!("SKIPPED: face-photo.jpg not found");
+            eprintln!("SKIPPED: face-photo.JPG not found");
             return Ok(());
         }
     };
 
-    let burst_a1 = load_test_jpeg("burst_a_01.jpg").unwrap_or_else(|| face_jpg.clone());
-    let burst_a2 = load_test_jpeg("burst_a_02.jpg").unwrap_or_else(|| face_jpg.clone());
+    let burst_a1 = load_test_jpeg("burst_a_01.JPG").unwrap_or_else(|| face_jpg.clone());
+    let burst_a2 = load_test_jpeg("burst_a_02.JPG").unwrap_or_else(|| face_jpg.clone());
 
     let images = vec![
         make_record(1, "burst_01.jpg", Some(1000), burst_a1.clone()),
@@ -124,7 +124,7 @@ fn test_manifest_is_valid_json() -> Result<()> {
         None => return Ok(()),
     };
 
-    let face_jpg = match load_test_jpeg("face-photo.jpg") {
+    let face_jpg = match load_test_jpeg("face-photo.JPG") {
         Some(b) => b,
         None => return Ok(()),
     };
