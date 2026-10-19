@@ -1,0 +1,128 @@
+# =============================================================================
+# CI — Continuous Integration for keeper.raw
+#
+# What this does: every time code is pushed to `master` (or a pull request is
+# opened against it), GitHub spins up fresh virtual machines and checks that:
+#   1. the Rust code is formatted          (cargo fmt)
+#   2. the Rust code has zero lint warnings (cargo clippy)
+#   3. all tests pass                      (cargo test)
+#   4. the React/TypeScript frontend builds (npm run build)
+# ...on Windows, macOS and Linux. A green tick on GitHub means all passed.
+#
+# Notes:
+#   - The ONNX models are NOT in the repo, so model-based tests print
+#     "SKIPPED" and pass. Model-free tests (stacker, XMP, focus maths,
+#     pHash on test-data/ images) run for real.
+#   - Timing-based performance tests are #[ignore]d — CI machines vary in
+#     speed. Run them locally: cargo test --release -- --ignored
+# =============================================================================
+
+# The name shown in the GitHub "Actions" tab and on the README badge.
+name: CI
+
+# ---- When to run ------------------------------------------------------------
+on:
+  push:
+    branches: [master]        # every push to master
+  pull_request:
+    branches: [master]        # every PR that targets master
+
+# ---- Safety: this workflow only needs to READ the repository ----------------
+permissions:
+  contents: read
+
+# ---- If you push twice quickly, cancel the older (now outdated) run ---------
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# ---- Settings shared by every step ------------------------------------------
+env:
+  CARGO_TERM_COLOR: always    # coloured cargo output in the logs
+
+jobs:
+  # ===========================================================================
+  # Job 1: formatting. Fast and OS-independent, so it runs once, on Linux.
+  # ===========================================================================
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      # Download the repository's code onto the virtual machine.
+      - uses: actions/checkout@v4
+
+      # Install stable Rust plus the rustfmt component.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # Fails if any file isn't formatted. Fix locally with: cargo fmt --all
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  # ===========================================================================
+  # Job 2: build + lint + test, once per operating system.
+  # A "matrix" runs the same steps on several machines in parallel.
+  # ===========================================================================
+  test:
+    name: Clippy + tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false        # if Windows fails, still finish macOS/Linux so we see everything
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60       # hard stop if something hangs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri on Linux needs system libraries (the WebKitGTK web view etc.).
+      # Windows and macOS already have what Tauri needs, so this step is
+      # skipped there ("if: runner.os == 'Linux'").
+      - name: Install Linux system libraries for Tauri
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      # ---- Frontend ---------------------------------------------------------
+      # Install Node.js. "cache: npm" re-uses downloaded packages between runs.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Install exactly the versions pinned in package-lock.json.
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # "tsc && vite build": type-checks the TypeScript, then bundles it into
+      # dist/. The Tauri crate embeds dist/ at compile time, so this must run
+      # BEFORE any cargo command, or the src-tauri crate fails to compile.
+      - name: Build frontend
+        run: npm run build
+
+      # ---- Rust -------------------------------------------------------------
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # Caches compiled dependencies (target/ and ~/.cargo) between runs.
+      # The first run is slow (~15–25 min); later runs are much faster.
+      - uses: Swatinem/rust-cache@v2
+
+      # Lint everything (library code, tests, binaries). Any warning = failure,
+      # matching the CONTRIBUTING.md quality bar.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Run every test. --no-fail-fast keeps going after a failure so the log
+      # shows ALL failing tests, not just the first. Debug mode is fine here:
+      # the slow ONNX tests skip in CI because the models aren't present.
+      - name: Tests
+        run: cargo test --workspace --no-fail-fast

@@ -3,7 +3,7 @@
 
 ### AI-powered photo culling. Offline. Open source. Free forever.
 
-[![Build Status](https://img.shields.io/github/actions/workflow/status/AtharvVatsal/keeper.raw/ci.yml?branch=main&style=flat-square)](https://github.com/AtharvVatsal/keeper-raw/actions)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/AtharvVatsal/keeper.raw/ci.yml?branch=master&style=flat-square)](https://github.com/AtharvVatsal/keeper.raw/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)](#system-requirements)
 
