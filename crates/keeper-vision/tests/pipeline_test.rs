@@ -4,20 +4,14 @@ use keeper_core::types::ImageRecord;
 use keeper_vision::pipeline::CullPipeline;
 use std::path::{Path, PathBuf};
 
-fn get_model_paths() -> Option<(PathBuf, PathBuf)> {
-    let face = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/yolov8n-face.onnx");
-    let mesh = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/face_landmark.onnx");
-
-    if !face.exists() {
-        eprintln!("SKIPPED: yolov8n-face.onnx not found");
+fn get_models_dir() -> Option<PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models");
+    let missing = keeper_vision::pipeline::missing_model_files(&dir);
+    if !missing.is_empty() {
+        eprintln!("SKIPPED: missing model file(s): {}", missing.join(", "));
         return None;
     }
-    if !mesh.exists() {
-        eprintln!("SKIPPED: face_landmark.onnx not found");
-        return None;
-    }
-
-    Some((face, mesh))
+    Some(dir)
 }
 
 fn load_test_jpeg(name: &str) -> Option<Vec<u8>> {
@@ -51,7 +45,7 @@ fn make_record(id: u64, name: &str, timestamp_ms: Option<i64>, data: Vec<u8>) ->
 
 #[test]
 fn test_pipeline_with_burst_grouping() -> Result<()> {
-    let (face_path, mesh_path) = match get_model_paths() {
+    let models_dir = match get_models_dir() {
         Some(p) => p,
         None => return Ok(()),
     };
@@ -75,7 +69,7 @@ fn test_pipeline_with_burst_grouping() -> Result<()> {
     ];
 
     let config = CullConfig::default();
-    let pipeline = CullPipeline::new(&face_path, &mesh_path, config)?;
+    let pipeline = CullPipeline::new(&models_dir, config)?;
 
     let manifest = pipeline.run(&images)?;
 
@@ -120,7 +114,7 @@ fn test_pipeline_with_burst_grouping() -> Result<()> {
 
 #[test]
 fn test_manifest_is_valid_json() -> Result<()> {
-    let (face_path, mesh_path) = match get_model_paths() {
+    let models_dir = match get_models_dir() {
         Some(p) => p,
         None => return Ok(()),
     };
@@ -132,7 +126,7 @@ fn test_manifest_is_valid_json() -> Result<()> {
 
     let images = vec![make_record(1, "test.jpg", Some(1000), face_jpg)];
     let config = CullConfig::default();
-    let pipeline = CullPipeline::new(&face_path, &mesh_path, config)?;
+    let pipeline = CullPipeline::new(&models_dir, config)?;
     let manifest = pipeline.run(&images)?;
 
     let json = serde_json::to_string_pretty(&manifest)?;

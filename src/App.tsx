@@ -30,7 +30,7 @@ interface ImageScore {
   has_face: boolean;
   face_bbox: BoundingBox | null;
   blink_detected: boolean;
-  eye_aspect_ratio: number | null;
+  blink_score: number | null;
   verdict: Verdict;
 }
 
@@ -60,7 +60,7 @@ interface ExportResponse {
 interface CullConfig {
   burst_threshold_secs: number;
   phash_similarity_threshold: number;
-  blink_ear_threshold: number;
+  blink_threshold: number;
   face_detection_confidence: number;
 }
 
@@ -125,14 +125,14 @@ function SettingsPanel({
   // Local state so changes don't apply until "Save"
   const [burstThreshold, setBurstThreshold] = useState(config.burst_threshold_secs);
   const [phashThreshold, setPhashThreshold] = useState(config.phash_similarity_threshold);
-  const [earThreshold, setEarThreshold] = useState(config.blink_ear_threshold);
+  const [blinkThreshold, setBlinkThreshold] = useState(config.blink_threshold);
   const [faceConfidence, setFaceConfidence] = useState(config.face_detection_confidence);
 
   function handleSave() {
     onSave({
       burst_threshold_secs: burstThreshold,
       phash_similarity_threshold: phashThreshold,
-      blink_ear_threshold: earThreshold,
+      blink_threshold: blinkThreshold,
       face_detection_confidence: faceConfidence,
     });
   }
@@ -140,7 +140,7 @@ function SettingsPanel({
   function handleReset() {
     setBurstThreshold(3.0);
     setPhashThreshold(14);
-    setEarThreshold(0.21);
+    setBlinkThreshold(0.4);
     setFaceConfidence(0.5);
   }
 
@@ -285,11 +285,12 @@ function SettingsPanel({
         </div>
 
         {/* ============================================================
-            BLINK THRESHOLD (EAR)
-            
-            Eye Aspect Ratio below which a blink is detected. Lower =
-            only catches fully closed eyes. Higher = catches squinting
-            and half-blinks too (but more false positives).
+            BLINK CERTAINTY
+
+            How sure the blink model must be that BOTH eyes are closed
+            (0 = open, 1 = closed) before a shot is rejected. Higher =
+            only rejects obvious blinks (safer). Lower = also catches
+            half-closed eyes, but may reject good shots.
             ============================================================ */}
         <div style={{ marginBottom: 24 }}>
           <div
@@ -300,24 +301,25 @@ function SettingsPanel({
             }}
           >
             <label style={{ fontSize: 14, color: "#ccc" }}>
-              Blink Sensitivity
+              Blink Certainty
             </label>
             <span style={{ fontSize: 14, color: "#f59e0b", fontWeight: "bold" }}>
-              {earThreshold.toFixed(2)}
+              {blinkThreshold.toFixed(2)}
             </span>
           </div>
           <input
             type="range"
-            min="0.10"
-            max="0.35"
-            step="0.01"
-            value={earThreshold}
-            onChange={(e) => setEarThreshold(parseFloat(e.target.value))}
+            min="0.20"
+            max="0.90"
+            step="0.05"
+            value={blinkThreshold}
+            onChange={(e) => setBlinkThreshold(parseFloat(e.target.value))}
             style={sliderStyle}
           />
           <p style={{ fontSize: 11, color: "#666", margin: "4px 0 0 0" }}>
-            Eye Aspect Ratio threshold. Lower = only flags fully closed
-            eyes. Higher = catches squinting too (more false positives).
+            How sure the model must be that both eyes are closed. Higher =
+            only rejects obvious blinks. Lower = catches half-closed eyes
+            too (may reject good shots).
           </p>
         </div>
 

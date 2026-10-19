@@ -50,7 +50,9 @@ pub struct ImageScore {
     pub has_face: bool,
     pub face_bbox: Option<BoundingBox>,
     pub blink_detected: bool,
-    pub eye_aspect_ratio: Option<f64>,
+    /// Blink score of the less-closed eye (0 = open, 1 = closed), if a face
+    /// was analysed.
+    pub blink_score: Option<f64>,
     pub verdict: Verdict,
 }
 

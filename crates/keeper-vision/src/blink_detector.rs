@@ -1,50 +1,98 @@
-use anyhow::{Context, Result};
+//! Blink detection with MediaPipe FaceMesh V2 + Blendshape V2 (Apache-2.0).
+//!
+//! 1. FaceMesh V2 finds 478 landmarks on a square, levelled 256×256 face crop
+//!    and reports how confident it is that the crop shows a usable face.
+//! 2. Blendshape V2 turns 146 of those landmarks into 52 expression scores,
+//!    including `eyeBlinkLeft` / `eyeBlinkRight` (0 = open, 1 = closed).
+//!
+//! This replaced a FaceMesh-v1 Eye-Aspect-Ratio heuristic. On hand-verified
+//! faces from a real concert shoot (10 closed, 33 open) the blink scores
+//! separate open from closed eyes with AUC 0.94 (EAR: 0.45, at best 0.84),
+//! and the "clear blink" rule below caught 7/10 blinks with 0/33 open eyes
+//! wrongly rejected (EAR: 4/10 caught, 3 wrong).
+
+use anyhow::{anyhow, Context, Result};
 use keeper_core::types::BoundingBox;
-use ndarray::Array4;
-use ort::session::SessionOutputs;
-use tracing::{debug, info, warn};
+use ndarray::{Array3, Array4};
+use std::path::Path;
+use tracing::{debug, info};
 
 use crate::preprocess;
 use crate::runtime::OnnxModel;
 
+/// FaceMesh V2 model file inside the models directory.
+pub const LANDMARK_MODEL_FILE: &str = "face_landmarks_detector.onnx";
+/// Blendshape V2 model file inside the models directory.
+pub const BLENDSHAPE_MODEL_FILE: &str = "face_blendshapes.onnx";
+
+/// FaceMesh V2 input: 256×256 RGB, values in [0, 1] (its native range — the
+/// model's face confidence is clearly higher than with [-1, 1]).
+const INPUT_SIZE: u32 = 256;
+
+/// Crop side = this × the longer side of the face box, i.e. the 25 % margin
+/// on each side that the FaceMesh V2 model card asks for.
+const FACE_CROP_SCALE: f32 = 1.5;
+
+/// Below this face confidence the landmarks — and so the blink scores — are
+/// unreliable (extreme tilt, profile, occlusion). Such faces are never
+/// rejected as blinks.
+pub const MIN_FACE_CONFIDENCE: f32 = 0.5;
+
+const NUM_LANDMARKS: usize = 478;
+
+/// Positions of `eyeBlinkLeft` / `eyeBlinkRight` in the 52 blendshape outputs
+/// (index 0 is `_neutral`). Verified on labelled closed eyes.
+const EYE_BLINK_LEFT: usize = 9;
+const EYE_BLINK_RIGHT: usize = 10;
+
+/// The 146 FaceMesh landmarks the Blendshape V2 model takes as input, in
+/// order (from the Blendshape V2 model card appendix).
+#[rustfmt::skip]
+const BLENDSHAPE_LANDMARKS: [usize; 146] = [
+    0, 1, 4, 5, 6, 7, 8, 10, 13, 14, 17, 21, 33, 37, 39, 40, 46, 52, 53, 54, 55, 58, 61, 63, 65, 66, 67, 70, 78, 80,
+    81, 82, 84, 87, 88, 91, 93, 95, 103, 105, 107, 109, 127, 132, 133, 136, 144, 145, 146, 148, 149, 150, 152, 153, 154, 155, 157,
+    158, 159, 160, 161, 162, 163, 168, 172, 173, 176, 178, 181, 185, 191, 195, 197, 234, 246, 249, 251, 263, 267, 269, 270, 276, 282,
+    283, 284, 285, 288, 291, 293, 295, 296, 297, 300, 308, 310, 311, 312, 314, 317, 318, 321, 323, 324, 332, 334, 336, 338, 356,
+    361, 362, 365, 373, 374, 375, 377, 378, 379, 380, 381, 382, 384, 385, 386, 387, 388, 389, 390, 397, 398, 400, 402, 405,
+    409, 415, 454, 466, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477,
+];
+
 #[derive(Debug, Clone)]
 pub struct BlinkResult {
+    /// True only for a *clear* blink — see [`is_clear_blink`].
     pub blink_detected: bool,
-    pub right_ear: f64,
-    pub left_ear: f64,
-    pub average_ear: f64,
-    /// EAR of the eye seen most face-on (the wider one) — the value the
-    /// blink decision is based on.
-    pub decision_ear: f64,
+    /// `eyeBlinkLeft` / `eyeBlinkRight`: 0 = open, 1 = closed.
+    pub left_blink: f32,
+    pub right_blink: f32,
+    /// FaceMesh's confidence (0..1) that the crop shows a usable face.
+    pub face_confidence: f32,
+    /// The less-closed eye's score — a blink means *both* eyes are closed.
+    pub blink_score: f32,
 }
 
 pub struct BlinkDetector {
-    model: OnnxModel,
-    is_nchw: bool,
-    input_size: u32,
+    landmarks: OnnxModel,
+    blendshapes: OnnxModel,
 }
 
-const RIGHT_EYE_LANDMARKS: [usize; 6] = [33, 159, 158, 133, 153, 145];
-const LEFT_EYE_LANDMARKS: [usize; 6] = [362, 380, 374, 263, 386, 385];
-
-/// Face crop side = this × the longer side of the face box. Matches the
-/// margin MediaPipe uses for its landmark model.
-const FACE_CROP_SCALE: f32 = 1.5;
+/// A blink is rejected only when FaceMesh is confident it sees a usable face
+/// and **both** eyes score as closed at least `threshold`. Precision matters
+/// more than recall: wrongly rejecting a good shot is worse than missing a
+/// blink.
+pub fn is_clear_blink(face_confidence: f32, left: f32, right: f32, threshold: f64) -> bool {
+    face_confidence >= MIN_FACE_CONFIDENCE && left.min(right) as f64 >= threshold
+}
 
 impl BlinkDetector {
-    pub fn new(model_path: &std::path::Path) -> Result<Self> {
-        let model = OnnxModel::load(model_path, "FaceMesh")?;
-        let is_nchw = false;
-
-        info!(
-            "Blink detector loaded (input format: {})",
-            if is_nchw { "NCHW" } else { "NHWC" }
-        );
-
+    /// Loads both models from `models_dir`.
+    pub fn new(models_dir: &Path) -> Result<Self> {
+        let landmarks = OnnxModel::load(&models_dir.join(LANDMARK_MODEL_FILE), "FaceMesh V2")?;
+        let blendshapes =
+            OnnxModel::load(&models_dir.join(BLENDSHAPE_MODEL_FILE), "Blendshape V2")?;
+        info!("Blink detector ready (FaceMesh V2 + Blendshape V2).");
         Ok(BlinkDetector {
-            model,
-            is_nchw,
-            input_size: 192,
+            landmarks,
+            blendshapes,
         })
     }
 
@@ -52,192 +100,173 @@ impl BlinkDetector {
         &mut self,
         jpeg_bytes: &[u8],
         face_bbox: &BoundingBox,
-        ear_threshold: f64,
+        threshold: f64,
     ) -> Result<BlinkResult> {
         let img =
             preprocess::decode_jpeg(jpeg_bytes).context("Blink detector: failed to decode JPEG")?;
-        self.detect_blink_image(&img, face_bbox, 0.0, ear_threshold)
+        self.detect_blink_image(&img, face_bbox, 0.0, threshold)
     }
 
     /// Same as [`detect_blink`](Self::detect_blink) on an already-decoded
     /// image. `face_bbox` must be in `img`'s pixel coordinates; `roll` is the
-    /// head's tilt in radians (from the eye keypoints; 0 if unknown).
-    ///
-    /// Measured on hand-labelled faces from a real concert shoot, this
-    /// preparation (square, levelled crop; decide on the wider eye) separates
-    /// open from closed eyes far better than the old stretched crop
-    /// (AUC 0.84 vs 0.45) and halves wrong rejects at the same threshold.
+    /// head's tilt in radians (from the face detector's eye keypoints; 0 if
+    /// unknown) — the model needs the eyes level.
     pub fn detect_blink_image(
         &mut self,
         img: &image::DynamicImage,
         face_bbox: &BoundingBox,
         roll: f32,
-        ear_threshold: f64,
+        threshold: f64,
     ) -> Result<BlinkResult> {
-        // ---- Square, levelled face crop -------------------------------------
-        // Stretching a (taller-than-wide) face box into the 192×192 input
-        // squashed vertical eye distances; tilted heads confused the model.
-        let side = face_bbox.width.max(face_bbox.height) * FACE_CROP_SCALE;
-        let cx = face_bbox.x + face_bbox.width / 2.0;
-        let cy = face_bbox.y + face_bbox.height / 2.0;
-        let crop = preprocess::sample_square(img, cx, cy, side, roll, self.input_size);
-        let crop = image::DynamicImage::ImageRgb8(crop);
-
-        let tensor = if self.is_nchw {
-            preprocess::image_to_nchw_tensor(&crop, preprocess::SIMPLE_MEAN, preprocess::SIMPLE_STD)
-        } else {
-            self.image_to_nhwc_tensor(&crop)
+        // ---- Pass 1: crop from the face box, levelled by detector keypoints ---
+        let coarse = CropParams {
+            cx: face_bbox.x + face_bbox.width / 2.0,
+            cy: face_bbox.y + face_bbox.height / 2.0,
+            side: face_bbox.width.max(face_bbox.height) * FACE_CROP_SCALE,
+            roll,
         };
+        let (coarse_landmarks, _) = self.run_facemesh(img, &coarse)?;
 
-        debug!("FaceMesh input tensor shape: {:?}", tensor.shape());
+        // ---- Pass 2: MediaPipe's tracking step -------------------------------
+        // Re-centre on the landmarks and re-level on the iris centres, then run
+        // again. Measured on the labelled faces this second pass is what gets
+        // blink scores to their best separation.
+        let refined = refine_crop(&coarse_landmarks, &coarse);
+        let (landmarks, face_confidence) = self.run_facemesh(img, &refined)?;
 
-        let input_value = ort::value::Tensor::from_array(tensor)
-            .context("Failed to create FaceMesh input tensor")?;
-        let outputs = self
-            .model
-            .session
-            .run(ort::inputs![input_value])
-            .context("FaceMesh inference failed")?;
-
-        let landmarks = extract_landmarks(&outputs)?;
-
-        if landmarks.len() < 468 {
-            warn!(
-                "Expected 468 landmarks, got {}. Model output may be wrong.",
-                landmarks.len()
-            );
-            return Ok(BlinkResult {
-                blink_detected: false,
-                right_ear: 1.0,
-                left_ear: 1.0,
-                average_ear: 1.0,
-                decision_ear: 1.0,
-            });
+        // The blendshape model takes (x, y) of its 146-landmark subset.
+        let mut points = Array3::<f32>::zeros((1, BLENDSHAPE_LANDMARKS.len(), 2));
+        for (i, &idx) in BLENDSHAPE_LANDMARKS.iter().enumerate() {
+            points[[0, i, 0]] = landmarks[idx * 3];
+            points[[0, i, 1]] = landmarks[idx * 3 + 1];
         }
 
-        let right_ear = compute_ear(&landmarks, &RIGHT_EYE_LANDMARKS);
-        let left_ear = compute_ear(&landmarks, &LEFT_EYE_LANDMARKS);
-        let average_ear = (right_ear + left_ear) / 2.0;
+        // ---- Blendshape V2: eyeBlinkLeft / eyeBlinkRight ---------------------
+        let points = ort::value::Tensor::from_array(points)
+            .map_err(|e| anyhow!("Failed to create blendshape input tensor: {e}"))?;
+        let outputs = self
+            .blendshapes
+            .session
+            .run(ort::inputs![points])
+            .map_err(|e| anyhow!("Blendshape V2 inference failed: {e}"))?;
+        let (_, scores) = outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| anyhow!("Failed to read blendshape scores: {e}"))?;
+        if scores.len() <= EYE_BLINK_RIGHT {
+            return Err(anyhow!(
+                "Blendshape V2 returned only {} scores",
+                scores.len()
+            ));
+        }
+        let (left_blink, right_blink) = (scores[EYE_BLINK_LEFT], scores[EYE_BLINK_RIGHT]);
 
-        // ---- Decide on the wider eye ----------------------------------------
-        // In three-quarter views the far eye is foreshortened: its width
-        // shrinks, which inflates its EAR, so a closed far eye can look open.
-        // The eye with the larger corner-to-corner width is seen most face-on.
-        let decision_ear = if eye_width(&landmarks, &RIGHT_EYE_LANDMARKS)
-            >= eye_width(&landmarks, &LEFT_EYE_LANDMARKS)
-        {
-            right_ear
-        } else {
-            left_ear
-        };
-        let blink_detected = decision_ear < ear_threshold;
-
+        let blink_detected = is_clear_blink(face_confidence, left_blink, right_blink, threshold);
         debug!(
-            "EAR: right={:.3}, left={:.3}, decision={:.3}, blink={}",
-            right_ear, left_ear, decision_ear, blink_detected
+            "Blink: left={:.2} right={:.2} face_conf={:.2} → blink={}",
+            left_blink, right_blink, face_confidence, blink_detected
         );
 
         Ok(BlinkResult {
             blink_detected,
-            right_ear,
-            left_ear,
-            average_ear,
-            decision_ear,
+            left_blink,
+            right_blink,
+            face_confidence,
+            blink_score: left_blink.min(right_blink),
         })
     }
 
-    fn image_to_nhwc_tensor(&self, img: &image::DynamicImage) -> Array4<f32> {
-        let rgb = img.to_rgb8();
-        let (width, height) = (rgb.width() as usize, rgb.height() as usize);
+    /// Runs FaceMesh V2 on one crop. Returns the 478 (x, y, z) landmarks in
+    /// crop pixels, flattened, and the face confidence (0..1).
+    fn run_facemesh(
+        &mut self,
+        img: &image::DynamicImage,
+        crop: &CropParams,
+    ) -> Result<(Vec<f32>, f32)> {
+        let patch =
+            preprocess::sample_square(img, crop.cx, crop.cy, crop.side, crop.roll, INPUT_SIZE);
 
-        let mut tensor = Array4::<f32>::zeros((1, height, width, 3));
-
-        for y in 0..height {
-            for x in 0..width {
-                let pixel = rgb.get_pixel(x as u32, y as u32);
-                for c in 0..3 {
-                    tensor[[0, y, x, c]] = pixel.0[c] as f32 / 255.0;
-                }
+        let n = INPUT_SIZE as usize;
+        let mut input = Array4::<f32>::zeros((1, n, n, 3));
+        for (x, y, pixel) in patch.enumerate_pixels() {
+            for c in 0..3 {
+                input[[0, y as usize, x as usize, c]] = pixel.0[c] as f32 / 255.0;
             }
         }
+        let input = ort::value::Tensor::from_array(input)
+            .map_err(|e| anyhow!("Failed to create FaceMesh input tensor: {e}"))?;
+        let outputs = self
+            .landmarks
+            .session
+            .run(ort::inputs![input])
+            .map_err(|e| anyhow!("FaceMesh V2 inference failed: {e}"))?;
 
-        tensor
-    }
-}
-
-fn extract_landmarks(outputs: &SessionOutputs<'_>) -> Result<Vec<[f64; 2]>> {
-    let output_tensor = outputs[0]
-        .try_extract_tensor::<f32>()
-        .context("Failed to extract FaceMesh output")?;
-
-    let (shape, data): (&ort::value::Shape, &[f32]) = output_tensor;
-    debug!(
-        "FaceMesh output shape: {:?}, data length: {}",
-        shape,
-        data.len()
-    );
-
-    let mut landmarks: Vec<[f64; 2]> = Vec::new();
-
-    if data.len() >= 1404 {
-        for i in 0..468 {
-            let x = data[i * 3] as f64;
-            let y = data[i * 3 + 1] as f64;
-            landmarks.push([x, y]);
+        let (_, lm) = outputs["Identity"]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| anyhow!("Failed to read FaceMesh landmarks: {e}"))?;
+        if lm.len() < NUM_LANDMARKS * 3 {
+            return Err(anyhow!(
+                "FaceMesh V2 returned {} values, expected {}",
+                lm.len(),
+                NUM_LANDMARKS * 3
+            ));
         }
-    } else if data.len() >= 936 {
-        for i in 0..468 {
-            let x = data[i * 2] as f64;
-            let y = data[i * 2 + 1] as f64;
-            landmarks.push([x, y]);
-        }
-    } else {
-        warn!(
-            "Unexpected FaceMesh output size: {} (expected >= 1404)",
-            data.len()
-        );
-    }
+        let (_, flag) = outputs["Identity_1"]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| anyhow!("Failed to read FaceMesh face flag: {e}"))?;
+        // The face flag is a logit; convert to a probability.
+        let confidence = 1.0 / (1.0 + (-flag[0]).exp());
 
-    Ok(landmarks)
+        Ok((lm[..NUM_LANDMARKS * 3].to_vec(), confidence))
+    }
 }
 
-fn compute_ear(landmarks: &[[f64; 2]], indices: &[usize; 6]) -> f64 {
-    for &idx in indices {
-        if idx >= landmarks.len() {
-            return 1.0;
-        }
-    }
-
-    let p1 = landmarks[indices[0]];
-    let p2 = landmarks[indices[1]];
-    let p3 = landmarks[indices[2]];
-    let p4 = landmarks[indices[3]];
-    let p5 = landmarks[indices[4]];
-    let p6 = landmarks[indices[5]];
-
-    let vertical_a = euclidean_distance(p2, p6);
-    let vertical_b = euclidean_distance(p3, p5);
-    let horizontal = euclidean_distance(p1, p4);
-
-    if horizontal < 1e-6 {
-        return 1.0;
-    }
-
-    (vertical_a + vertical_b) / (2.0 * horizontal)
+/// A square crop of the source image: centre, side length (source pixels)
+/// and rotation (radians, clockwise in image coordinates).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CropParams {
+    cx: f32,
+    cy: f32,
+    side: f32,
+    roll: f32,
 }
 
-/// Corner-to-corner width of an eye (landmarks p1 → p4).
-fn eye_width(landmarks: &[[f64; 2]], indices: &[usize; 6]) -> f64 {
-    if indices.iter().any(|&i| i >= landmarks.len()) {
-        return 0.0;
-    }
-    euclidean_distance(landmarks[indices[0]], landmarks[indices[3]])
+/// Iris-centre landmarks in FaceMesh V2 (the eye on the image's left, then
+/// the eye on the image's right).
+const IRIS_CENTRE_LEFT_IN_IMAGE: usize = 468;
+const IRIS_CENTRE_RIGHT_IN_IMAGE: usize = 473;
+
+/// Maps a point in crop pixels back to source-image pixels.
+fn crop_to_source(crop: &CropParams, u: f32, v: f32) -> (f32, f32) {
+    let scale = crop.side / INPUT_SIZE as f32;
+    let half = INPUT_SIZE as f32 / 2.0;
+    let (dx, dy) = ((u - half) * scale, (v - half) * scale);
+    let (sin, cos) = crop.roll.sin_cos();
+    (crop.cx + dx * cos - dy * sin, crop.cy + dx * sin + dy * cos)
 }
 
-fn euclidean_distance(a: [f64; 2], b: [f64; 2]) -> f64 {
-    let dx = a[0] - b[0];
-    let dy = a[1] - b[1];
-    (dx * dx + dy * dy).sqrt()
+/// Second-pass crop from first-pass landmarks: centred on the landmarks'
+/// mean and rotated so the iris centres are level. Same side length.
+fn refine_crop(landmarks: &[f32], crop: &CropParams) -> CropParams {
+    let n = (landmarks.len() / 3) as f32;
+    let (sum_u, sum_v) = landmarks
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .fold((0.0, 0.0), |(su, sv), p| (su + p[0], sv + p[1]));
+    let (cx, cy) = crop_to_source(crop, sum_u / n, sum_v / n);
+
+    let iris = |i: usize| (landmarks[i * 3], landmarks[i * 3 + 1]);
+    let (lu, lv) = iris(IRIS_CENTRE_LEFT_IN_IMAGE);
+    let (ru, rv) = iris(IRIS_CENTRE_RIGHT_IN_IMAGE);
+    // The crop is already rotated by `crop.roll`; add the remaining tilt.
+    let roll = crop.roll + (rv - lv).atan2(ru - lu);
+
+    CropParams {
+        cx,
+        cy,
+        side: crop.side,
+        roll,
+    }
 }
 
 #[cfg(test)]
@@ -245,99 +274,88 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ear_open_eye() {
-        let mut landmarks = vec![[0.0, 0.0]; 468];
-
-        landmarks[33] = [0.3, 0.4];
-        landmarks[159] = [0.35, 0.35];
-        landmarks[158] = [0.4, 0.35];
-        landmarks[133] = [0.45, 0.4];
-        landmarks[153] = [0.4, 0.45];
-        landmarks[145] = [0.35, 0.45];
-
-        let ear = compute_ear(&landmarks, &RIGHT_EYE_LANDMARKS);
-        assert!(ear > 0.21, "Open eye EAR ({:.3}) should be > 0.21", ear);
-    }
-
-    #[test]
-    fn test_ear_closed_eye() {
-        let mut landmarks = vec![[0.0, 0.0]; 468];
-
-        landmarks[33] = [0.3, 0.4];
-        landmarks[159] = [0.35, 0.40];
-        landmarks[158] = [0.4, 0.40];
-        landmarks[133] = [0.45, 0.4];
-        landmarks[153] = [0.4, 0.41];
-        landmarks[145] = [0.35, 0.41];
-
-        let ear = compute_ear(&landmarks, &RIGHT_EYE_LANDMARKS);
-        assert!(ear < 0.21, "Closed eye EAR ({:.3}) should be < 0.21", ear);
-    }
-
-    #[test]
-    fn test_ear_symmetry() {
-        let mut landmarks = vec![[0.0, 0.0]; 468];
-
-        landmarks[33] = [0.3, 0.4];
-        landmarks[159] = [0.35, 0.35];
-        landmarks[158] = [0.4, 0.35];
-        landmarks[133] = [0.45, 0.4];
-        landmarks[153] = [0.4, 0.45];
-        landmarks[145] = [0.35, 0.45];
-
-        landmarks[362] = [0.55, 0.4];
-        landmarks[380] = [0.6, 0.35];
-        landmarks[374] = [0.65, 0.35];
-        landmarks[263] = [0.7, 0.4];
-        landmarks[386] = [0.65, 0.45];
-        landmarks[385] = [0.6, 0.45];
-
-        let right_ear = compute_ear(&landmarks, &RIGHT_EYE_LANDMARKS);
-        let left_ear = compute_ear(&landmarks, &LEFT_EYE_LANDMARKS);
-
-        let diff = (right_ear - left_ear).abs();
+    fn test_blendshape_landmark_subset_is_valid() {
+        assert_eq!(BLENDSHAPE_LANDMARKS.len(), 146);
         assert!(
-            diff < 0.01,
-            "Symmetric eyes should have similar EAR (diff={:.3})",
-            diff
+            BLENDSHAPE_LANDMARKS.windows(2).all(|w| w[0] < w[1]),
+            "sorted, no duplicates"
         );
+        assert!(*BLENDSHAPE_LANDMARKS.last().unwrap() < NUM_LANDMARKS);
     }
 
     #[test]
-    fn test_eye_width_picks_the_face_on_eye() {
-        // Three-quarter view: the right eye is seen face-on (wide, closed);
-        // the left eye is foreshortened (narrow) which inflates its EAR.
-        let mut landmarks = vec![[0.0, 0.0]; 468];
-        // Right eye: 0.15 wide, lids 0.01 apart → EAR ≈ 0.067 (closed).
-        landmarks[33] = [0.30, 0.40];
-        landmarks[159] = [0.35, 0.395];
-        landmarks[158] = [0.40, 0.395];
-        landmarks[133] = [0.45, 0.40];
-        landmarks[153] = [0.40, 0.405];
-        landmarks[145] = [0.35, 0.405];
-        // Left eye: only 0.04 wide, same lids → EAR ≈ 0.25 (looks open).
-        landmarks[362] = [0.60, 0.40];
-        landmarks[380] = [0.613, 0.405];
-        landmarks[374] = [0.627, 0.405];
-        landmarks[263] = [0.64, 0.40];
-        landmarks[386] = [0.627, 0.395];
-        landmarks[385] = [0.613, 0.395];
-
-        let right_w = eye_width(&landmarks, &RIGHT_EYE_LANDMARKS);
-        let left_w = eye_width(&landmarks, &LEFT_EYE_LANDMARKS);
-        assert!(right_w > left_w);
-
-        let right_ear = compute_ear(&landmarks, &RIGHT_EYE_LANDMARKS);
-        let left_ear = compute_ear(&landmarks, &LEFT_EYE_LANDMARKS);
-        assert!(right_ear < 0.1, "face-on eye is closed: {right_ear:.3}");
-        assert!(
-            left_ear > 0.21,
-            "foreshortened eye looks open: {left_ear:.3}"
-        );
+    fn test_clear_blink_needs_both_eyes_closed() {
+        assert!(is_clear_blink(0.9, 0.8, 0.7, 0.4));
+        // One eye open (a wink, or a foreshortened eye) is not a clear blink.
+        assert!(!is_clear_blink(0.9, 0.8, 0.2, 0.4));
+        assert!(!is_clear_blink(0.9, 0.2, 0.8, 0.4));
     }
 
     #[test]
-    fn test_eye_width_out_of_range_is_zero() {
-        assert_eq!(eye_width(&[[0.0, 0.0]; 10], &RIGHT_EYE_LANDMARKS), 0.0);
+    fn test_unsure_face_is_never_a_blink() {
+        // Extreme tilt / profile: FaceMesh isn't confident → don't reject.
+        assert!(!is_clear_blink(0.45, 0.9, 0.9, 0.4));
+        assert!(is_clear_blink(0.5, 0.9, 0.9, 0.4));
+    }
+
+    /// 478 landmarks all at (u, v), with the two iris centres overridden.
+    fn landmarks_at(u: f32, v: f32, left_iris: (f32, f32), right_iris: (f32, f32)) -> Vec<f32> {
+        let mut lm: Vec<f32> = (0..NUM_LANDMARKS).flat_map(|_| [u, v, 0.0]).collect();
+        lm[IRIS_CENTRE_LEFT_IN_IMAGE * 3] = left_iris.0;
+        lm[IRIS_CENTRE_LEFT_IN_IMAGE * 3 + 1] = left_iris.1;
+        lm[IRIS_CENTRE_RIGHT_IN_IMAGE * 3] = right_iris.0;
+        lm[IRIS_CENTRE_RIGHT_IN_IMAGE * 3 + 1] = right_iris.1;
+        lm
+    }
+
+    #[test]
+    fn test_refine_crop_keeps_a_centred_level_face() {
+        let crop = CropParams {
+            cx: 500.0,
+            cy: 300.0,
+            side: 512.0,
+            roll: 0.0,
+        };
+        let lm = landmarks_at(128.0, 128.0, (100.0, 110.0), (156.0, 110.0));
+        let refined = refine_crop(&lm, &crop);
+        // Mean is pulled very slightly by the two iris points; roll stays 0.
+        assert!((refined.cx - 500.0).abs() < 0.2 && (refined.cy - 300.0).abs() < 0.2);
+        assert!(refined.roll.abs() < 1e-6);
+        assert_eq!(refined.side, 512.0);
+    }
+
+    #[test]
+    fn test_refine_crop_recentres_and_relevels() {
+        // Side 512 over a 256 crop → 2 source px per crop px.
+        let crop = CropParams {
+            cx: 500.0,
+            cy: 300.0,
+            side: 512.0,
+            roll: 0.0,
+        };
+        // Face 10 crop px right of centre; eyes tilted 45° (right eye lower).
+        let lm = landmarks_at(138.0, 128.0, (120.0, 120.0), (140.0, 140.0));
+        let refined = refine_crop(&lm, &crop);
+        assert!((refined.cx - 520.0).abs() < 0.5, "cx {}", refined.cx);
+        assert!((refined.roll - std::f32::consts::FRAC_PI_4).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_crop_to_source_respects_rotation() {
+        let crop = CropParams {
+            cx: 100.0,
+            cy: 100.0,
+            side: 256.0,
+            roll: std::f32::consts::FRAC_PI_2,
+        };
+        // 10 px right of centre in a crop rotated 90° clockwise = 10 px down.
+        let (x, y) = crop_to_source(&crop, 138.0, 128.0);
+        assert!((x - 100.0).abs() < 1e-4 && (y - 110.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_threshold_is_inclusive() {
+        assert!(is_clear_blink(1.0, 0.4, 0.4, 0.4));
+        assert!(!is_clear_blink(1.0, 0.39, 0.9, 0.4));
     }
 }

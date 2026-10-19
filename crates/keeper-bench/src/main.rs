@@ -87,23 +87,13 @@ fn main() -> Result<()> {
     );
     println!();
 
-    let face_model = args.models_dir.join("yolov8n-face.onnx");
-    let mesh_model = args.models_dir.join("face_landmark.onnx");
-
-    if !face_model.exists() {
+    let missing = keeper_vision::pipeline::missing_model_files(&args.models_dir);
+    if !missing.is_empty() {
         anyhow::bail!(
-            "Face detection model not found at {:?}\n\
-             Place yolov8n-face.onnx in {:?} or pass --models <dir>.",
-            face_model,
-            args.models_dir
-        );
-    }
-    if !mesh_model.exists() {
-        anyhow::bail!(
-            "Face mesh model not found at {:?}\n\
-             Place face_landmark.onnx in {:?} or pass --models <dir>.",
-            mesh_model,
-            args.models_dir
+            "Missing model file(s) in {:?}: {}\n\
+             See models/readme.md, or pass --models <dir>.",
+            args.models_dir,
+            missing.join(", ")
         );
     }
 
@@ -138,7 +128,7 @@ fn main() -> Result<()> {
 
     // ── Model load (pipeline init) ─────────────────────────────────────────
     let init_start = Instant::now();
-    let pipeline = CullPipeline::new(&face_model, &mesh_model, config.clone())
+    let pipeline = CullPipeline::new(&args.models_dir, config.clone())
         .context("Failed to initialize CullPipeline")?;
     let init_elapsed = init_start.elapsed();
     println!("Model load (pipeline init): {}", fmt_duration(init_elapsed));

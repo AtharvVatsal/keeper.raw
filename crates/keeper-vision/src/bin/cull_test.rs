@@ -30,21 +30,12 @@ fn main() -> Result<()> {
     println!();
 
     let models_dir = Path::new("models");
-    let face_model = models_dir.join("yolov8n-face.onnx");
-    let mesh_model = models_dir.join("face_landmark.onnx");
-
-    if !face_model.exists() {
+    let missing = keeper_vision::pipeline::missing_model_files(models_dir);
+    if !missing.is_empty() {
         anyhow::bail!(
-            "Face detection model not found at {:?}\n\
-             Please place yolov8n-face.onnx in the models/ directory.",
-            face_model
-        );
-    }
-    if !mesh_model.exists() {
-        anyhow::bail!(
-            "Face mesh model not found at {:?}\n\
-             Please place face_landmark.onnx in the models/ directory.",
-            mesh_model
+            "Missing model file(s) in {:?}: {}\nSee models/readme.md.",
+            models_dir,
+            missing.join(", ")
         );
     }
 
@@ -59,7 +50,7 @@ fn main() -> Result<()> {
 
     println!("\nInitializing pipeline...");
     let config = CullConfig::default();
-    let pipeline = CullPipeline::new(&face_model, &mesh_model, config)?;
+    let pipeline = CullPipeline::new(models_dir, config)?;
 
     println!("\nRunning pipeline...\n");
     let manifest = pipeline.run(&images)?;
@@ -114,13 +105,13 @@ fn main() -> Result<()> {
         };
 
         println!(
-            "  {} | sharpness={:.1} | face={} | EAR={} | {}",
+            "  {} | sharpness={:.1} | face={} | blink={} | {}",
             name,
             score.sharpness_score,
             if score.has_face { "yes" } else { "no " },
             score
-                .eye_aspect_ratio
-                .map(|e| format!("{:.3}", e))
+                .blink_score
+                .map(|e| format!("{:.2}", e))
                 .unwrap_or_else(|| "n/a".to_string()),
             verdict_str,
         );

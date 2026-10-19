@@ -151,31 +151,24 @@ fn cull_images(state: State<'_, AppState>) -> Result<CullManifest, String> {
         return Err("No images loaded. Open a folder first.".to_string());
     }
 
-    let face_model = std::path::PathBuf::from("../models/yolov8n-face.onnx");
-    let mesh_model = std::path::PathBuf::from("../models/face_landmark.onnx");
-
-    if !face_model.exists() {
+    // Dev builds run from src-tauri/, hence "../models" (known limitation —
+    // installed builds will need the Tauri resource path instead).
+    let models_dir = std::path::PathBuf::from("../models");
+    let missing = keeper_vision::pipeline::missing_model_files(&models_dir);
+    if !missing.is_empty() {
         let cwd = std::env::current_dir().unwrap_or_default();
         return Err(format!(
-            "Face model not found at '{}'. Current directory: '{}'. \
-             Make sure you run 'cargo tauri dev' from the project root folder.",
-            face_model.display(),
-            cwd.display()
-        ));
-    }
-    if !mesh_model.exists() {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        return Err(format!(
-            "Face mesh model not found at '{}'. Current directory: '{}'. \
-             Make sure you run 'cargo tauri dev' from the project root folder.",
-            mesh_model.display(),
+            "Missing model file(s) in '{}': {}. Current directory: '{}'. \
+             See models/readme.md, and run 'cargo tauri dev' from the project root folder.",
+            models_dir.display(),
+            missing.join(", "),
             cwd.display()
         ));
     }
 
     let config = state.config.lock().map_err(|e| e.to_string())?.clone();
 
-    let pipeline = CullPipeline::new(&face_model, &mesh_model, config)
+    let pipeline = CullPipeline::new(&models_dir, config)
         .map_err(|e| format!("Failed to initialize pipeline: {}", e))?;
 
     let manifest = pipeline

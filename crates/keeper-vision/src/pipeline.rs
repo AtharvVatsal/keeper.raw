@@ -33,16 +33,36 @@ pub struct CullPipeline {
     config: CullConfig,
 }
 
-impl CullPipeline {
-    pub fn new(face_model_path: &Path, mesh_model_path: &Path, config: CullConfig) -> Result<Self> {
-        info!("Initializing CullPipeline...");
+/// Face detection model file inside the models directory.
+pub const FACE_MODEL_FILE: &str = "yolov8n-face.onnx";
 
-        let face_detector =
-            FaceDetector::new(face_model_path).context("Failed to load face detection model")?;
+/// Every model file the pipeline needs, relative to the models directory.
+pub const REQUIRED_MODEL_FILES: [&str; 3] = [
+    FACE_MODEL_FILE,
+    crate::blink_detector::LANDMARK_MODEL_FILE,
+    crate::blink_detector::BLENDSHAPE_MODEL_FILE,
+];
+
+/// Returns the required model files missing from `models_dir` (empty = all
+/// present), so callers can show a helpful message before loading.
+pub fn missing_model_files(models_dir: &Path) -> Vec<&'static str> {
+    REQUIRED_MODEL_FILES
+        .into_iter()
+        .filter(|f| !models_dir.join(f).exists())
+        .collect()
+}
+
+impl CullPipeline {
+    /// Loads all models from `models_dir` (see [`REQUIRED_MODEL_FILES`]).
+    pub fn new(models_dir: &Path, config: CullConfig) -> Result<Self> {
+        info!("Initializing CullPipeline from {:?}...", models_dir);
+
+        let face_detector = FaceDetector::new(&models_dir.join(FACE_MODEL_FILE))
+            .context("Failed to load face detection model")?;
         info!("  ✓ Face detector loaded");
 
         let blink_detector =
-            BlinkDetector::new(mesh_model_path).context("Failed to load face mesh model")?;
+            BlinkDetector::new(models_dir).context("Failed to load blink detection models")?;
         info!("  ✓ Blink detector loaded");
 
         info!("CullPipeline ready.");
@@ -204,7 +224,7 @@ impl CullPipeline {
             has_face: false,
             face_bbox: None,
             blink_detected: false,
-            eye_aspect_ratio: None,
+            blink_score: None,
             verdict: Verdict::Unrated,
         };
 
@@ -279,15 +299,15 @@ impl CullPipeline {
         // Head tilt from the two eye keypoints (an angle, so the same in
         // `small` and `work` coordinates). Used to level the face crop.
         let roll = primary_face.map(head_roll).unwrap_or(0.0);
-        let (blink_detected, eye_aspect_ratio) = if let Some(ref bbox) = work_bbox {
+        let (blink_detected, blink_score) = if let Some(ref bbox) = work_bbox {
             let mut detector = self.blink_detector.lock().unwrap();
             match detector.detect_blink_image(
                 &decoded.work,
                 bbox,
                 roll,
-                self.config.blink_ear_threshold,
+                self.config.blink_threshold,
             ) {
-                Ok(result) => (result.blink_detected, Some(result.decision_ear)),
+                Ok(result) => (result.blink_detected, Some(result.blink_score as f64)),
                 Err(e) => {
                     debug!(
                         "Blink detection failed for '{}': {} (non-fatal)",
@@ -306,7 +326,7 @@ impl CullPipeline {
             has_face,
             face_bbox,
             blink_detected,
-            eye_aspect_ratio,
+            blink_score,
             verdict: Verdict::Unrated,
         };
         (score, Some(phash))
