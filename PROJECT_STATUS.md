@@ -23,9 +23,9 @@ The app is a Tauri v2 shell with a React/TypeScript frontend. Behind it is a Rus
 ### 2.1 The pipeline, stage by stage
 
 1. **Ingest (`keeper-ingest`)**
-   - Scans the folder for CR2/CR3/NEF/ARW files.
+   - Scans the folder for RAW files: officially CR2/CR3/NEF/ARW, with RAF/DNG/ORF/RW2 accepted as best effort.
    - Uses ExifTool to pull each file's embedded JPEG preview.
-   - Parses EXIF: timestamp, focal length, ISO, aperture, camera serial, lens.
+   - Parses EXIF: timestamp, camera make and model, focal length, aperture, ISO.
    - Using the embedded preview instead of decoding the RAW is the biggest performance decision in the app.
 
 2. **Stacking (`keeper-stacker`)**
@@ -39,7 +39,7 @@ The app is a Tauri v2 shell with a React/TypeScript frontend. Behind it is a Rus
 3. **Vision (`keeper-vision`)**
    - Everything runs through ONNX Runtime via `ort 2.0.0-rc.12`.
    - **Face detection:** YOLOv8-nano, with letterbox preprocessing and non-maximum suppression (NMS).
-   - **Focus scoring:** Variance of Laplacian on the eye region, divided by a noise floor (MAD on a flat patch) so high-ISO noise doesn't look like sharpness. Frames with no face fall back to rule-of-thirds weighting.
+   - **Focus scoring:** Variance of Laplacian on the eye region, divided by a noise floor (MAD on a flat patch) so high-ISO noise doesn't look like sharpness. Frames with no face are scored on the centre of the frame.
    - **Blink detection:** MediaPipe Face Mesh landmarks feed an Eye Aspect Ratio; EAR below `0.21` means reject.
    - **Orchestration:** `CullPipeline` runs all of this and emits a JSON manifest.
 
@@ -92,7 +92,7 @@ There's also a speed issue: launching ExifTool once per file is slow. The `-stay
 
 ### 4.3 Pipeline speed
 
-`FaceDetector` and `BlinkDetector` sit behind a `Mutex` because `ort` needs `&mut self`. That means the ML stages effectively run one image at a time even with Rayon.
+`FaceDetector` and `BlinkDetector` sit behind a `Mutex` because `ort` needs `&mut self`. That means the ML stages run one image at a time; Rayon is not used in the pipeline yet.
 
 A small pool of sessions, one per worker thread, would remove that bottleneck. The only real numbers so far are from the 26-image dev-profile run, about **108 seconds total**. The MVP target works out to roughly **160 ms per image**, end to end.
 

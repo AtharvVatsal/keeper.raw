@@ -48,8 +48,8 @@ Go to the [Releases page](https://github.com/AtharvVatsal/keeper.raw/releases/la
 ### Use
 
 1. **Open** keeper.raw
-2. **Pick a folder** of RAW files (click "Open Folder" or drag-and-drop)
-3. **Click "Cull Images"** — the AI analyzes every photo in seconds
+2. **Pick a folder** of RAW files (click "Open Folder")
+3. **Click "Cull Images"** — the AI analyzes every photo locally on your CPU
 4. **Review** — arrow through Scenes in the loupe view, verify the AI's picks
 5. **Override** if needed — press **K** to keep, **X** to reject, **U** to unrate
 6. **Click "Export XMP"** — sidecar files appear next to your RAWs
@@ -66,7 +66,7 @@ keeper.raw runs a multi-stage computer vision pipeline entirely on your local CP
 5. **Flag** — MediaPipe Face Mesh computes the Eye Aspect Ratio; if both eyes are below threshold, the image is flagged as a blink
 6. **Rank** — The sharpest non-blink image in each Scene becomes the Keeper
 
-All ML models are quantized ONNX format, running via ONNX Runtime on CPU.
+All ML models run in ONNX format via ONNX Runtime on your CPU.
 
 ## System Requirements
 
@@ -92,7 +92,7 @@ cd keeper.raw
 # Install frontend dependencies
 npm install
 
-# Download the ONNX models (see models/README.md)
+# Download the ONNX models (see models/readme.md)
 # Place yolov8n-face.onnx and face_landmark.onnx in the models/ directory
 
 # Run in development mode

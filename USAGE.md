@@ -60,7 +60,7 @@ The AI will:
 4. **Detect blinks** using Eye Aspect Ratio
 5. **Select keepers** based on sharpness and blink status
 
-A progress indicator shows how many images have been processed.
+The button shows "Culling... (this takes a while)" until the analysis finishes. There is no per-image progress indicator yet.
 
 ### Step 3: Review Results
 

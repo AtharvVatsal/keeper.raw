@@ -39,7 +39,7 @@ The ML models are not included in the Git repo (they're too large). Download the
 2. Download `yolov8n-face.onnx` and `face_landmark.onnx`
 3. Place both files in the `models/` directory at the project root
 
-Or follow the instructions in `models/README.md` to export them yourself.
+Or follow the instructions in `models/readme.md` to export them yourself.
 
 ## Development Commands
 ```bash
@@ -81,4 +81,4 @@ keeper-raw/
 
 ## Architecture
 
-See [docs/architecture.md](architecture.md) for the full technical architecture.
+See [architecture.md](../architecture.md) for the full technical architecture.

@@ -34,7 +34,7 @@ npm install
 cargo tauri dev
 ```
 
-You'll also need the ONNX model files — see [models/README.md](models/README.md).
+You'll also need the ONNX model files — see [models/readme.md](models/readme.md).
 
 ## Project Structure
 crates/

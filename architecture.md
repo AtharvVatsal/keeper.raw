@@ -192,7 +192,7 @@ face_detection_confidence = 0.5
 ## Performance Considerations
 
 1. **Preview Extraction**: Sequential using ExifTool (slowest phase)
-2. **Scene Stacking**: Parallel pHash computation using Rayon
+2. **Scene Stacking**: Sequential pHash computation (Rayon is not used yet)
 3. **Vision Pipeline**: Sequential per image (models loaded once)
 4. **Memory**: Previews stored in memory (~1-5MB each)
 
