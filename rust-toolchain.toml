@@ -1,0 +1,14 @@
+# =============================================================================
+# Pins the exact Rust version for this project — on every machine and in CI.
+#
+# Without this file, "stable" means whatever version each machine happens to
+# have, so a newer compiler/clippy in CI can fail on code that passes locally.
+# rustup reads this file automatically when you run cargo inside the repo.
+#
+# To upgrade: change `channel`, run `cargo clippy --workspace --all-targets`
+# and `cargo test`, fix anything new, and commit the change.
+# =============================================================================
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

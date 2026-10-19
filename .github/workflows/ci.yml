@@ -49,12 +49,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Download the repository's code onto the virtual machine.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      # Install stable Rust plus the rustfmt component.
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      # Install the Rust version pinned in rust-toolchain.toml (with rustfmt
+      # and clippy), so CI uses exactly the same compiler as your machine.
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
 
       # Fails if any file isn't formatted. Fix locally with: cargo fmt --all
       - name: Check formatting
@@ -74,7 +74,7 @@ jobs:
     timeout-minutes: 60       # hard stop if something hangs
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Tauri on Linux needs system libraries (the WebKitGTK web view etc.).
       # Windows and macOS already have what Tauri needs, so this step is
@@ -92,7 +92,7 @@ jobs:
 
       # ---- Frontend ---------------------------------------------------------
       # Install Node.js. "cache: npm" re-uses downloaded packages between runs.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -108,9 +108,9 @@ jobs:
         run: npm run build
 
       # ---- Rust -------------------------------------------------------------
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      # Same pinned toolchain as the fmt job (see rust-toolchain.toml).
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
 
       # Caches compiled dependencies (target/ and ~/.cargo) between runs.
       # The first run is slow (~15–25 min); later runs are much faster.
