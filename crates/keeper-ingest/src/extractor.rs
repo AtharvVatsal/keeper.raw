@@ -174,7 +174,7 @@ fn parse_exif_datetime(s: &str) -> Option<i64> {
 
     let days_since_epoch = days_from_date(year, month, day)?;
     let total_seconds =
-        (days_since_epoch as i64) * 86400 + (hour as i64) * 3600 + (min as i64) * 60 + (sec as i64);
+        days_since_epoch * 86400 + (hour as i64) * 3600 + (min as i64) * 60 + (sec as i64);
 
     Some(total_seconds * 1000)
 }
