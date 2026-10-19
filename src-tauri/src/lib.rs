@@ -59,11 +59,17 @@ fn load_config_from_disk() -> CullConfig {
                     return config;
                 }
                 Err(e) => {
-                    eprintln!("Warning: could not parse config file: {}. Using defaults.", e);
+                    eprintln!(
+                        "Warning: could not parse config file: {}. Using defaults.",
+                        e
+                    );
                 }
             },
             Err(e) => {
-                eprintln!("Warning: could not read config file: {}. Using defaults.", e);
+                eprintln!(
+                    "Warning: could not read config file: {}. Using defaults.",
+                    e
+                );
             }
         }
     }
@@ -74,8 +80,8 @@ fn load_config_from_disk() -> CullConfig {
 fn save_config_to_disk(config: &CullConfig) -> Result<(), String> {
     let path = get_config_path();
 
-    let toml_string = toml::to_string_pretty(config)
-        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    let toml_string =
+        toml::to_string_pretty(config).map_err(|e| format!("Failed to serialize config: {}", e))?;
 
     fs::write(&path, &toml_string)
         .map_err(|e| format!("Failed to write config to '{}': {}", path.display(), e))?;
@@ -95,8 +101,7 @@ async fn ingest_folder(
         return Err(format!("Not a valid folder: {}", path));
     }
 
-    let records = keeper_ingest::ingest_directory(&dir)
-        .map_err(|e| e.to_string())?;
+    let records = keeper_ingest::ingest_directory(&dir).map_err(|e| e.to_string())?;
 
     let preview_dir = std::env::temp_dir().join("keeper-raw-previews");
     fs::create_dir_all(&preview_dir).map_err(|e| e.to_string())?;
@@ -166,7 +171,8 @@ fn cull_images(state: State<'_, AppState>) -> Result<CullManifest, String> {
     let pipeline = CullPipeline::new(&face_model, &mesh_model, config)
         .map_err(|e| format!("Failed to initialize pipeline: {}", e))?;
 
-    let manifest = pipeline.run(&images)
+    let manifest = pipeline
+        .run(&images)
         .map_err(|e| format!("Pipeline failed: {}", e))?;
 
     Ok(manifest)
@@ -183,10 +189,7 @@ fn export_xmp(
         return Err("No images loaded. Open a folder first.".to_string());
     }
 
-    let image_map: HashMap<u64, &ImageRecord> = images
-        .iter()
-        .map(|img| (img.id, img))
-        .collect();
+    let image_map: HashMap<u64, &ImageRecord> = images.iter().map(|img| (img.id, img)).collect();
 
     let entries: Vec<ExportEntry> = verdicts
         .iter()
@@ -224,10 +227,7 @@ fn get_config(state: State<'_, AppState>) -> Result<CullConfig, String> {
 }
 
 #[command]
-fn save_config(
-    config: CullConfig,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+fn save_config(config: CullConfig, state: State<'_, AppState>) -> Result<(), String> {
     {
         let mut stored = state.config.lock().map_err(|e| e.to_string())?;
         *stored = config.clone();

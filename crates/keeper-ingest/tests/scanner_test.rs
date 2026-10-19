@@ -25,14 +25,18 @@ fn test_ingest_extracts_previews() {
     println!("Extracted {} previews", records.len());
 
     for record in &records {
-        println!("  {} — {}x{} — ISO {:?} — {:?}",
+        println!(
+            "  {} — {}x{} — ISO {:?} — {:?}",
             record.file_name,
             record.preview_width,
             record.preview_height,
             record.iso,
             record.camera_model,
         );
-        assert!(!record.preview_data.is_empty(),
-            "Preview should not be empty for {}", record.file_name);
+        assert!(
+            !record.preview_data.is_empty(),
+            "Preview should not be empty for {}",
+            record.file_name
+        );
     }
 }
