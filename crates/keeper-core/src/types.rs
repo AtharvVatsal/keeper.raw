@@ -73,6 +73,9 @@ pub struct ImageScore {
     /// Blink score of the less-closed eye (0 = open, 1 = closed), if a face
     /// was analysed.
     pub blink_score: Option<f64>,
+    /// How sharp the sharpest part of the photo is (see
+    /// `keeper_vision::quality::peak_sharpness`); below 500 = out of focus.
+    pub peak_sharpness: f64,
     pub verdict: Verdict,
 }
 

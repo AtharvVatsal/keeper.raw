@@ -287,6 +287,7 @@ impl CullPipeline {
             face_bbox: None,
             blink_detected: false,
             blink_score: None,
+            peak_sharpness: 0.0,
             verdict: Verdict::Unrated,
         };
 
@@ -327,6 +328,25 @@ impl CullPipeline {
             let score = ImageScore {
                 verdict: Verdict::Reject {
                     reason: RejectReason::Unusable,
+                },
+                ..unscored
+            };
+            return (score, Some(phash));
+        }
+
+        // ---- Out of focus everywhere? (camera shake / missed focus) -----------
+        // Rejected outright and never chosen as a keeper — not even when it is
+        // the only photo of its moment.
+        let peak_sharpness = quality::peak_sharpness(&decoded.work) as f64;
+        if peak_sharpness < quality::BLURRY_PEAK_SHARPNESS as f64 {
+            debug!(
+                "'{}' is out of focus (peak sharpness {:.0})",
+                image.file_name, peak_sharpness
+            );
+            let score = ImageScore {
+                peak_sharpness,
+                verdict: Verdict::Reject {
+                    reason: RejectReason::OutOfFocus,
                 },
                 ..unscored
             };
@@ -397,6 +417,7 @@ impl CullPipeline {
             face_bbox,
             blink_detected,
             blink_score,
+            peak_sharpness,
             verdict: Verdict::Unrated,
         };
         (score, Some(phash))
@@ -405,8 +426,8 @@ impl CullPipeline {
 
 /// Picks each scene's keeper and sets every image's verdict.
 ///
-/// - Unusable (black/blank) frames keep their `Reject { Unusable }` verdict
-///   and are never a keeper.
+/// - Frames rejected during analysis (black/blank `Unusable`, or
+///   `OutOfFocus`) keep their verdict and are never a keeper.
 /// - The keeper is the sharpest frame that isn't a clear blink. If every
 ///   usable frame blinked (including a lone frame), the scene has **no**
 ///   keeper: clear blinks are always rejected (av's reject policy).
@@ -419,7 +440,7 @@ pub fn select_keepers(scenes: &mut [Scene], scores: &mut [ImageScore]) {
             .image_ids
             .iter()
             .filter_map(|id| score_map.get(id).copied())
-            .filter(|s| !is_unusable(s) && !s.blink_detected)
+            .filter(|s| !is_rejected_in_analysis(s) && !s.blink_detected)
             .collect();
 
         scene.keeper_id = sharpest(&candidates);
@@ -431,8 +452,8 @@ pub fn select_keepers(scenes: &mut [Scene], scores: &mut [ImageScore]) {
     let keeper_ids: std::collections::HashSet<ImageId> =
         scenes.iter().filter_map(|s| s.keeper_id).collect();
     for score in scores.iter_mut() {
-        if is_unusable(score) {
-            continue; // keep its Reject { Unusable } verdict
+        if is_rejected_in_analysis(score) {
+            continue; // keep its Unusable / OutOfFocus verdict
         }
         if keeper_ids.contains(&score.image_id) {
             score.verdict = Verdict::Keeper;
@@ -456,12 +477,13 @@ fn sharpest(candidates: &[&ImageScore]) -> Option<ImageId> {
         .map(|s| s.image_id)
 }
 
-/// True if analysis already rejected this image as a black/blank frame.
-fn is_unusable(score: &ImageScore) -> bool {
+/// True if analysis already rejected this image (black/blank frame or out
+/// of focus everywhere). Such images are never a keeper.
+fn is_rejected_in_analysis(score: &ImageScore) -> bool {
     matches!(
         score.verdict,
         Verdict::Reject {
-            reason: RejectReason::Unusable
+            reason: RejectReason::Unusable | RejectReason::OutOfFocus
         }
     )
 }
@@ -507,6 +529,7 @@ mod tests {
             face_bbox: None,
             blink_detected: blink,
             blink_score: None,
+            peak_sharpness: 1000.0,
             verdict: Verdict::Unrated,
         }
     }
@@ -571,6 +594,27 @@ mod tests {
         select_keepers(&mut scenes, &mut scores);
         assert_eq!(scenes[0].keeper_id, Some(2));
         assert_eq!(scores[0].verdict, unusable);
+    }
+
+    #[test]
+    fn test_out_of_focus_frame_is_never_keeper() {
+        let blurry = Verdict::Reject {
+            reason: RejectReason::OutOfFocus,
+        };
+        let mut scenes = vec![scene(1, &[1]), scene(2, &[2, 3])];
+        let mut scores = vec![
+            score(1, 50.0, false),
+            score(2, 90.0, false),
+            score(3, 10.0, false),
+        ];
+        scores[0].verdict = blurry;
+        scores[1].verdict = blurry;
+        select_keepers(&mut scenes, &mut scores);
+        // A lone blurry photo has no keeper; a blurry frame never beats a sharp one.
+        assert_eq!(scenes[0].keeper_id, None);
+        assert_eq!(scenes[1].keeper_id, Some(3));
+        assert_eq!(scores[0].verdict, blurry);
+        assert_eq!(scores[1].verdict, blurry);
     }
 
     #[test]

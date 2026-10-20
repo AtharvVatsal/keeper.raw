@@ -32,6 +32,7 @@ interface ImageScore {
   face_bbox: BoundingBox | null;
   blink_detected: boolean;
   blink_score: number | null;
+  peak_sharpness: number;
   verdict: Verdict;
 }
 

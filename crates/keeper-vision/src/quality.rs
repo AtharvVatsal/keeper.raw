@@ -66,6 +66,90 @@ pub fn is_unusable(img: &DynamicImage) -> bool {
     strongest_local_contrast(img) < UNUSABLE_LOCAL_CONTRAST
 }
 
+// =============================================================================
+// Blur: is ANY part of the photo in focus?
+//
+// The focus score used to pick keepers measures the eye region (or the
+// centre), which can't tell "the subject is small or off-centre" from
+// "nothing is sharp". Here we ask whether any region of the frame is in
+// focus: the Laplacian variance of 32×32 tiles on a ≤ 1500 px copy, averaged
+// over the 5 sharpest tiles. Camera-shake and missed-focus shots have no
+// sharp tile anywhere; a small in-focus subject (a bird in clear sky) does.
+//
+// Calibrated on 118 real NEFs (av's shoot): genuinely sharp photos scored
+// 1,092–22,140 (lowest: small birds in clear sky); the one motion-blurred
+// shot 259. The same sharp photos blurred by σ = 1 px at this size (~4 px at
+// full 24 MP) scored 145–431 (one landscape 1,057); σ ≥ 2 px scored ≤ 91.
+// Deliberately conservative: a photo whose background is sharp but whose
+// subject is soft is NOT caught here.
+// =============================================================================
+
+/// Below this peak sharpness the whole photo is out of focus or shaken.
+/// Measured with this implementation on the 118 NEFs: the motion-blurred shot
+/// scored 363, the lowest sharp photo (small bird in clear sky) 1,151 — the
+/// threshold leans towards keeping photos (a wrong reject is worse than a
+/// missed blur).
+pub const BLURRY_PEAK_SHARPNESS: f32 = 500.0;
+
+/// Long edge (px) the photo is scaled to before measuring, so the threshold
+/// means the same for every camera resolution.
+const SHARPNESS_LONG_EDGE: u32 = 1500;
+const SHARPNESS_TILE: usize = 32;
+const SHARPEST_TILES: usize = 5;
+
+/// How sharp the sharpest part of the photo is: mean Laplacian variance of
+/// the 5 sharpest 32×32 tiles, measured on a copy scaled to ≤ 1500 px.
+pub fn peak_sharpness(img: &DynamicImage) -> f32 {
+    let scaled;
+    let img = if img.width().max(img.height()) > SHARPNESS_LONG_EDGE {
+        scaled = img.thumbnail(SHARPNESS_LONG_EDGE, SHARPNESS_LONG_EDGE);
+        &scaled
+    } else {
+        img
+    };
+    let gray = img.to_luma8();
+    let (w, h) = (gray.width() as usize, gray.height() as usize);
+    if w < SHARPNESS_TILE + 2 || h < SHARPNESS_TILE + 2 {
+        return 0.0;
+    }
+    let px = gray.as_raw();
+
+    // Laplacian of the interior pixels; tile (tx, ty) covers Laplacian
+    // positions [tx·32, tx·32 + 32) × [ty·32, ty·32 + 32).
+    let (lw, lh) = (w - 2, h - 2);
+    let (tiles_x, tiles_y) = (lw / SHARPNESS_TILE, lh / SHARPNESS_TILE);
+    let mut variances: Vec<f64> = Vec::with_capacity(tiles_x * tiles_y);
+    for ty in 0..tiles_y {
+        for tx in 0..tiles_x {
+            let (mut sum, mut sum_sq) = (0.0f64, 0.0f64);
+            for ly in ty * SHARPNESS_TILE..(ty + 1) * SHARPNESS_TILE {
+                for lx in tx * SHARPNESS_TILE..(tx + 1) * SHARPNESS_TILE {
+                    let (x, y) = (lx + 1, ly + 1);
+                    let lap = px[(y - 1) * w + x] as f64
+                        + px[(y + 1) * w + x] as f64
+                        + px[y * w + x - 1] as f64
+                        + px[y * w + x + 1] as f64
+                        - 4.0 * px[y * w + x] as f64;
+                    sum += lap;
+                    sum_sq += lap * lap;
+                }
+            }
+            let n = (SHARPNESS_TILE * SHARPNESS_TILE) as f64;
+            let mean = sum / n;
+            variances.push(sum_sq / n - mean * mean);
+        }
+    }
+
+    variances.sort_unstable_by(|a, b| b.total_cmp(a));
+    let top = &variances[..variances.len().min(SHARPEST_TILES)];
+    (top.iter().sum::<f64>() / top.len() as f64) as f32
+}
+
+/// True if no part of the photo is in focus (camera shake / missed focus).
+pub fn is_blurry(img: &DynamicImage) -> bool {
+    peak_sharpness(img) < BLURRY_PEAK_SHARPNESS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +196,54 @@ mod tests {
             img.put_pixel(50 + i * 100, 60, Luma([255]));
         }
         assert!(is_unusable(&DynamicImage::ImageLuma8(img)));
+    }
+
+    /// Grey background with a sharp black/white checkerboard patch of
+    /// `patch` px at the centre (a crisp, in-focus subject).
+    fn sharp_subject(w: u32, h: u32, patch: u32) -> DynamicImage {
+        let (x0, y0) = ((w - patch) / 2, (h - patch) / 2);
+        DynamicImage::ImageLuma8(GrayImage::from_fn(w, h, |x, y| {
+            let inside = x >= x0 && x < x0 + patch && y >= y0 && y < y0 + patch;
+            if inside && ((x / 4) + (y / 4)) % 2 == 0 {
+                Luma([20])
+            } else if inside {
+                Luma([235])
+            } else {
+                Luma([150])
+            }
+        }))
+    }
+
+    #[test]
+    fn test_sharp_subject_is_not_blurry() {
+        let img = sharp_subject(1500, 1000, 200);
+        assert!(peak_sharpness(&img) > BLURRY_PEAK_SHARPNESS);
+        assert!(!is_blurry(&img));
+    }
+
+    #[test]
+    fn test_out_of_focus_photo_is_blurry() {
+        let blurred = sharp_subject(1500, 1000, 200).blur(3.0);
+        assert!(is_blurry(&blurred), "peak {}", peak_sharpness(&blurred));
+    }
+
+    #[test]
+    fn test_tiny_sharp_subject_on_flat_sky_is_not_blurry() {
+        // Like a small bird in a clear sky: most of the frame is featureless.
+        let img = sharp_subject(1500, 1000, 48);
+        assert!(!is_blurry(&img), "peak {}", peak_sharpness(&img));
+    }
+
+    #[test]
+    fn test_large_preview_is_measured_on_a_downscaled_copy() {
+        // A 6000 px preview of the same scene must not be judged blurrier
+        // just because it has more pixels per detail.
+        let big = sharp_subject(6000, 4000, 800).resize_exact(
+            6000,
+            4000,
+            image::imageops::FilterType::Nearest,
+        );
+        assert!(!is_blurry(&big), "peak {}", peak_sharpness(&big));
     }
 
     #[test]
