@@ -17,6 +17,15 @@ use crate::focus_scorer;
 use crate::preprocess;
 use crate::quality;
 
+/// Progress of a cull, reported after each analysed image. Analysis is
+/// almost all of a cull's time; stacking and keeper selection take
+/// milliseconds afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CullProgress {
+    pub analysed: usize,
+    pub total: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CullManifest {
     pub total_images: usize,
@@ -129,6 +138,17 @@ impl CullPipeline {
     }
 
     pub fn run(&self, images: &[ImageRecord]) -> Result<CullManifest> {
+        self.run_with_progress(images, &|_| {})
+    }
+
+    /// Same as [`run`](Self::run), calling `on_progress` after each image is
+    /// analysed. It is called from the worker threads, possibly at the same
+    /// time, so it must be cheap and thread-safe.
+    pub fn run_with_progress(
+        &self,
+        images: &[ImageRecord],
+        on_progress: &(dyn Fn(CullProgress) + Sync),
+    ) -> Result<CullManifest> {
         let start_time = std::time::Instant::now();
 
         if images.is_empty() {
@@ -181,6 +201,10 @@ impl CullPipeline {
                             out.push((i, self.analyze_single_image(&mut analyzer, image)));
 
                             let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                            on_progress(CullProgress {
+                                analysed: n,
+                                total: images.len(),
+                            });
                             if n.is_multiple_of(100) || n == images.len() {
                                 info!("  Analysed {}/{} images", n, images.len());
                             }

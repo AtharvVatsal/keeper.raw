@@ -139,3 +139,46 @@ fn test_manifest_is_valid_json() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_progress_is_reported_once_per_image() -> Result<()> {
+    use keeper_vision::pipeline::CullProgress;
+    use std::sync::Mutex;
+
+    let models_dir = match get_models_dir() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    let names = [
+        "face-photo.JPG",
+        "no-face-photo.JPG",
+        "sharp-portrait.JPG",
+        "soft-portrait.JPG",
+    ];
+    let mut images = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        let Some(data) = load_test_jpeg(name) else {
+            eprintln!("SKIPPED: {name} not found");
+            return Ok(());
+        };
+        images.push(make_record(i as u64 + 1, name, None, data));
+    }
+
+    // Several workers, so reports arrive from different threads.
+    let pipeline = CullPipeline::with_workers(&models_dir, CullConfig::default(), 3)?;
+    let seen: Mutex<Vec<CullProgress>> = Mutex::new(Vec::new());
+    let manifest = pipeline.run_with_progress(&images, &|p| seen.lock().unwrap().push(p))?;
+
+    let mut seen = seen.into_inner().unwrap();
+    assert_eq!(seen.len(), images.len(), "one report per image");
+    assert!(seen.iter().all(|p| p.total == images.len()));
+    seen.sort_by_key(|p| p.analysed);
+    let counts: Vec<usize> = seen.iter().map(|p| p.analysed).collect();
+    assert_eq!(
+        counts,
+        (1..=images.len()).collect::<Vec<_>>(),
+        "counts 1..=total"
+    );
+    assert_eq!(manifest.total_images, images.len());
+    Ok(())
+}

@@ -1,12 +1,12 @@
 use keeper_core::config::CullConfig;
 use keeper_core::types::ImageRecord;
-use keeper_vision::pipeline::{CullManifest, CullPipeline};
+use keeper_vision::pipeline::{CullManifest, CullPipeline, CullProgress};
 use keeper_xmp::{ExportEntry, ExportVerdict};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Mutex;
-use tauri::{command, State};
+use tauri::{command, AppHandle, Emitter, State};
 
 pub struct AppState {
     pub images: Mutex<Vec<ImageRecord>>,
@@ -163,8 +163,10 @@ async fn ingest_folder(
 }
 
 #[command]
-fn cull_images(state: State<'_, AppState>) -> Result<CullManifest, String> {
-    let images = state.images.lock().map_err(|e| e.to_string())?;
+async fn cull_images(app: AppHandle, state: State<'_, AppState>) -> Result<CullManifest, String> {
+    // Copy what the cull needs and release the lock straight away. Records
+    // are small (previews live on disk), so this is cheap.
+    let images: Vec<ImageRecord> = state.images.lock().map_err(|e| e.to_string())?.clone();
 
     if images.is_empty() {
         return Err("No images loaded. Open a folder first.".to_string());
@@ -187,15 +189,33 @@ fn cull_images(state: State<'_, AppState>) -> Result<CullManifest, String> {
 
     let config = state.config.lock().map_err(|e| e.to_string())?.clone();
 
-    let pipeline = CullPipeline::new(&models_dir, config)
-        .map_err(|e| format!("Failed to initialize pipeline: {}", e))?;
+    // A cull of 3,000 images takes ~6 minutes. Run it on a background
+    // thread so the window stays responsive (a non-async command would run
+    // on the main thread and freeze the UI), and report progress as events.
+    tauri::async_runtime::spawn_blocking(move || {
+        let total = images.len();
+        let _ = app.emit(CULL_PROGRESS_EVENT, CullProgress { analysed: 0, total });
 
-    let manifest = pipeline
-        .run(&images)
-        .map_err(|e| format!("Pipeline failed: {}", e))?;
+        let pipeline = CullPipeline::new(&models_dir, config)
+            .map_err(|e| format!("Failed to initialize pipeline: {}", e))?;
 
-    Ok(manifest)
+        // At most ~200 progress events per cull, plus the final one.
+        let step = (total / 200).max(1);
+        pipeline
+            .run_with_progress(&images, &|progress| {
+                if progress.analysed.is_multiple_of(step) || progress.analysed == progress.total {
+                    let _ = app.emit(CULL_PROGRESS_EVENT, progress);
+                }
+            })
+            .map_err(|e| format!("Pipeline failed: {}", e))
+    })
+    .await
+    .map_err(|e| format!("Cull task failed: {}", e))?
 }
+
+/// Event emitted during a cull with a [`CullProgress`] payload
+/// (`{ analysed, total }`); the frontend shows it as a progress bar.
+const CULL_PROGRESS_EVENT: &str = "cull-progress";
 
 #[command]
 fn export_xmp(

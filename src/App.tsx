@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 
 interface ImageSummary {
   id: number;
@@ -49,6 +50,12 @@ interface CullManifest {
   scenes: Scene[];
   image_scores: ImageScore[];
   processing_time_secs: number;
+}
+
+// Sent by the backend ("cull-progress" event) after each analysed photo.
+interface CullProgress {
+  analysed: number;
+  total: number;
 }
 
 interface ExportResponse {
@@ -1062,6 +1069,78 @@ function ImageCard({
   );
 }
 
+// ============================================================
+// CULL PROGRESS BAR
+//
+// Shown while a cull runs in the background. The backend sends a
+// "cull-progress" event after each analysed photo; the time left is
+// estimated from the average time per photo so far.
+// ============================================================
+function formatTimeLeft(seconds: number): string {
+  if (seconds < 60) return "less than a minute left";
+  const minutes = Math.round(seconds / 60);
+  return `about ${minutes} min left`;
+}
+
+function CullProgressBar({
+  progress,
+  startedAt,
+}: {
+  progress: CullProgress | null;
+  startedAt: number;
+}) {
+  const total = progress?.total ?? 0;
+  const analysed = progress?.analysed ?? 0;
+  const fraction = total > 0 ? analysed / total : 0;
+
+  let label: string;
+  if (!progress || analysed === 0) {
+    label = "Loading AI models…";
+  } else if (analysed >= total) {
+    label = "Grouping scenes and picking keepers…";
+  } else {
+    const elapsedSecs = (Date.now() - startedAt) / 1000;
+    const secsLeft = (elapsedSecs / analysed) * (total - analysed);
+    label = `Analysing ${analysed.toLocaleString()} of ${total.toLocaleString()} photos · ${formatTimeLeft(secsLeft)}`;
+  }
+
+  return (
+    <div
+      style={{
+        marginTop: 12,
+        padding: "12px 16px",
+        backgroundColor: "#111",
+        borderRadius: 8,
+        border: "1px solid #333",
+        maxWidth: 560,
+      }}
+    >
+      <div style={{ fontSize: 14, color: "#ccc", marginBottom: 8 }}>{label}</div>
+      <div
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={total}
+        aria-valuenow={analysed}
+        style={{
+          height: 8,
+          backgroundColor: "#222",
+          borderRadius: 4,
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            width: `${Math.round(fraction * 100)}%`,
+            height: "100%",
+            backgroundColor: "#22c55e",
+            transition: "width 0.3s ease",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 type FilterMode = "all" | "keepers" | "rejects";
 
 function App() {
@@ -1070,6 +1149,8 @@ function App() {
   const [folderPath, setFolderPath] = useState("");
   const [manifest, setManifest] = useState<CullManifest | null>(null);
   const [culling, setCulling] = useState(false);
+  const [cullProgress, setCullProgress] = useState<CullProgress | null>(null);
+  const [cullStartedAt, setCullStartedAt] = useState(0);
   const [filter, setFilter] = useState<FilterMode>("all");
 
   // Loupe state
@@ -1296,6 +1377,12 @@ function App() {
   async function handleCull() {
     setCulling(true);
     setExportResult(null);
+    setCullProgress(null);
+    setCullStartedAt(Date.now());
+    // Listen before invoking so no early progress event is missed.
+    const unlisten = await listen<CullProgress>("cull-progress", (event) =>
+      setCullProgress(event.payload)
+    );
     try {
       const result = await invoke<CullManifest>("cull_images");
       setManifest(result);
@@ -1303,7 +1390,9 @@ function App() {
     } catch (err) {
       alert("Cull error: " + err);
     } finally {
+      unlisten();
       setCulling(false);
+      setCullProgress(null);
     }
   }
 
@@ -1448,7 +1537,7 @@ function App() {
                 fontWeight: "bold",
               }}
             >
-              {culling ? "Culling... (this takes a while)" : "Cull Images"}
+              {culling ? "Culling…" : "Cull Images"}
             </button>
           )}
 
@@ -1478,11 +1567,13 @@ function App() {
           </p>
         )}
 
-        {images.length > 0 && !manifest && (
+        {images.length > 0 && !manifest && !culling && (
           <p style={{ color: "#888", marginTop: 8 }}>
             {images.length} images loaded — ready to cull
           </p>
         )}
+
+        {culling && <CullProgressBar progress={cullProgress} startedAt={cullStartedAt} />}
 
         {manifest && (
           <div
