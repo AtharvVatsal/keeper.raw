@@ -18,8 +18,9 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 // call returns all metadata as JSON. Chunks run in parallel.
 // =============================================================================
 
-/// Upper bound on exiftool processes running at once.
-const MAX_PARALLEL_EXIFTOOL: usize = 4;
+/// Upper bound on exiftool processes running at once. Measured on 3,068
+/// NEFs (16-core PC): 4 → 113 s, 6 → 82 s, 8 → 66 s, 12 → 64 s.
+const MAX_PARALLEL_EXIFTOOL: usize = 8;
 
 /// Embedded previews to try, best first. Each later tag is only asked for
 /// the files the earlier ones didn't cover.
