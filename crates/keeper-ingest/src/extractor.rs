@@ -1,50 +1,241 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use keeper_core::types::ImageRecord;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+// =============================================================================
+// Batch extraction with ExifTool
+//
+// Starting exiftool costs ~0.5 s on Windows (the standalone .exe unpacks
+// itself on every launch), and ingest used to launch it twice per file
+// (~1.05 s/file). Now the files are split into a few chunks; for each chunk
+// ONE exiftool call writes every embedded preview into a temp folder and ONE
+// call returns all metadata as JSON. Chunks run in parallel.
+// =============================================================================
+
+/// Upper bound on exiftool processes running at once.
+const MAX_PARALLEL_EXIFTOOL: usize = 4;
+
+/// Embedded previews to try, best first. Each later tag is only asked for
+/// the files the earlier ones didn't cover.
+const PREVIEW_TAGS: [&str; 3] = ["JpgFromRaw", "PreviewImage", "OtherImage"];
+
+const METADATA_ARGS: [&str; 8] = [
+    "-j",
+    "-DateTimeOriginal",
+    "-Make",
+    "-Model",
+    "-FocalLength",
+    "-FNumber",
+    "-ISO",
+    // `#` = numeric value (1–8) instead of text like "Rotate 270 CW".
+    "-Orientation#",
+];
+
+/// Extracts the embedded preview and metadata of a single RAW file.
 pub fn extract_preview(raw_path: &Path) -> Result<ImageRecord> {
+    extract_all(&[raw_path.to_path_buf()])?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("No embedded preview found in {}", raw_path.display()))
+}
+
+/// Extracts previews and metadata for all `paths`, in order. Files without
+/// an embedded preview are skipped with a warning. Fails only if exiftool
+/// can't be run at all.
+pub fn extract_all(paths: &[PathBuf]) -> Result<Vec<ImageRecord>> {
+    if paths.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let work_dir = TempDir::new()?;
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(MAX_PARALLEL_EXIFTOOL)
+        .min(paths.len());
+    let chunk_size = paths.len().div_ceil(workers);
+
+    // ---- Run the chunks in parallel ------------------------------------------
+    let results: Vec<Result<ChunkOutput>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = paths
+            .chunks(chunk_size)
+            .enumerate()
+            .map(|(i, chunk)| {
+                let dir = work_dir.path().join(format!("chunk{i}"));
+                scope.spawn(move || extract_chunk(chunk, &dir))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err(anyhow!("exiftool worker thread panicked")))
+            })
+            .collect()
+    });
+
+    // ---- Assemble records in input order --------------------------------------
+    let mut records = Vec::with_capacity(paths.len());
+    for (chunk, result) in paths.chunks(chunk_size).zip(results) {
+        let output = result?;
+        for ((path, preview), exif) in chunk.iter().zip(output.previews).zip(output.metadata) {
+            match preview {
+                Some(preview_data) => records.push(build_record(path, preview_data, &exif)),
+                None => warn!("Skipping {}: no embedded preview found", path.display()),
+            }
+        }
+    }
+
+    info!(
+        "Successfully extracted {}/{} previews ({} exiftool worker(s))",
+        records.len(),
+        paths.len(),
+        workers
+    );
+    Ok(records)
+}
+
+/// What one exiftool worker produced, one entry per input path.
+struct ChunkOutput {
+    previews: Vec<Option<Vec<u8>>>,
+    metadata: Vec<serde_json::Value>,
+}
+
+fn extract_chunk(paths: &[PathBuf], dir: &Path) -> Result<ChunkOutput> {
+    std::fs::create_dir_all(dir)?;
+
+    // ---- Previews: one call per tag, only for files still missing one -------
+    let mut previews: Vec<Option<Vec<u8>>> = vec![None; paths.len()];
+    for tag in PREVIEW_TAGS {
+        let missing: Vec<usize> = (0..paths.len())
+            .filter(|&i| previews[i].is_none())
+            .collect();
+        if missing.is_empty() {
+            break;
+        }
+        let tag_dir = dir.join(tag);
+        std::fs::create_dir_all(&tag_dir)?;
+        let argfile = write_argfile(
+            dir,
+            &format!("{tag}.args"),
+            missing.iter().map(|&i| &paths[i]),
+        )?;
+        // `-w DIR/%f.%e.jpg` writes each file's preview to e.g. DIR/IMG_1.CR3.jpg.
+        let pattern = format!("{}/%f.%e.jpg", tag_dir.to_string_lossy().replace('\\', "/"));
+        run_exiftool(&["-b", &format!("-{tag}"), "-w", &pattern], &argfile)?;
+
+        for &i in &missing {
+            let file_name = paths[i].file_name().unwrap_or_default().to_string_lossy();
+            if let Ok(bytes) = std::fs::read(tag_dir.join(format!("{file_name}.jpg"))) {
+                if !bytes.is_empty() {
+                    previews[i] = Some(bytes);
+                }
+            }
+        }
+    }
+
+    // ---- Metadata: one JSON call for the whole chunk -------------------------
+    let argfile = write_argfile(dir, "metadata.args", paths.iter())?;
+    let json = run_exiftool(&METADATA_ARGS, &argfile)?;
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(&json).unwrap_or_default();
+
+    // Match entries to paths by exiftool's `SourceFile` (separators normalised);
+    // fall back to position, which exiftool preserves.
+    let key = |s: &str| s.replace('\\', "/");
+    let by_source: HashMap<String, &serde_json::Value> = entries
+        .iter()
+        .filter_map(|e| {
+            e.get("SourceFile")
+                .and_then(|s| s.as_str())
+                .map(|s| (key(s), e))
+        })
+        .collect();
+    let metadata = paths
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            by_source
+                .get(&key(&p.to_string_lossy()))
+                .copied()
+                .or_else(|| entries.get(i))
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect();
+
+    Ok(ChunkOutput { previews, metadata })
+}
+
+/// Writes one path per line (UTF-8, read with `-charset filename=utf8`).
+fn write_argfile<'a>(
+    dir: &Path,
+    name: &str,
+    paths: impl Iterator<Item = &'a PathBuf>,
+) -> Result<PathBuf> {
+    let file = dir.join(name);
+    let mut text = String::new();
+    for p in paths {
+        text.push_str(&p.to_string_lossy());
+        text.push('\n');
+    }
+    std::fs::write(&file, text).with_context(|| format!("Failed to write {}", file.display()))?;
+    Ok(file)
+}
+
+/// Runs exiftool on the files listed in `argfile` and returns its stdout.
+/// A non-zero exit (e.g. some files lacked the tag) is not an error.
+fn run_exiftool(args: &[&str], argfile: &Path) -> Result<Vec<u8>> {
+    let output = Command::new("exiftool")
+        .args(["-q", "-q", "-charset", "filename=utf8"])
+        .args(args)
+        .arg("-@")
+        .arg(argfile)
+        .output()
+        .context("Failed to run exiftool. Is it installed and in your PATH?")?;
+    Ok(output.stdout)
+}
+
+/// A uniquely named temp folder, deleted when dropped.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new() -> Result<Self> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("keeper-raw-ingest-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create {}", dir.display()))?;
+        Ok(TempDir(dir))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Builds an `ImageRecord` from a preview and exiftool's JSON for one file.
+fn build_record(raw_path: &Path, preview_data: Vec<u8>, exif: &serde_json::Value) -> ImageRecord {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let file_name = raw_path
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-
-    let preview_data = {
-        let jpg_from_raw = Command::new("exiftool")
-            .args(["-b", "-JpgFromRaw"])
-            .arg(raw_path)
-            .output()
-            .context("Failed to run exiftool. Is it installed and in your PATH?")?;
-
-        if !jpg_from_raw.stdout.is_empty() {
-            jpg_from_raw.stdout
-        } else {
-            let preview = Command::new("exiftool")
-                .args(["-b", "-PreviewImage"])
-                .arg(raw_path)
-                .output()?;
-
-            if !preview.stdout.is_empty() {
-                preview.stdout
-            } else {
-                let other = Command::new("exiftool")
-                    .args(["-b", "-OtherImage"])
-                    .arg(raw_path)
-                    .output()?;
-                other.stdout
-            }
-        }
-    };
-
-    if preview_data.is_empty() {
-        anyhow::bail!("No embedded preview found in {}", file_name);
-    }
 
     let (preview_width, preview_height) = {
         use image::ImageReader;
@@ -56,30 +247,6 @@ pub fn extract_preview(raw_path: &Path) -> Result<ImageRecord> {
             .and_then(|reader| reader.into_dimensions().ok())
             .unwrap_or((0, 0))
     };
-
-    let exif_output = Command::new("exiftool")
-        .args([
-            "-j",
-            "-DateTimeOriginal",
-            "-Make",
-            "-Model",
-            "-FocalLength",
-            "-FNumber",
-            "-ISO",
-            // `#` = numeric value (1–8) instead of text like "Rotate 270 CW".
-            "-Orientation#",
-        ])
-        .arg(raw_path)
-        .output()?;
-
-    let exif_json: serde_json::Value =
-        serde_json::from_slice(&exif_output.stdout).unwrap_or_default();
-
-    let exif = exif_json
-        .as_array()
-        .and_then(|arr| arr.first())
-        .cloned()
-        .unwrap_or_default();
 
     let timestamp = exif
         .get("DateTimeOriginal")
@@ -118,7 +285,7 @@ pub fn extract_preview(raw_path: &Path) -> Result<ImageRecord> {
         .map(|v| v as u8)
         .unwrap_or(1);
 
-    info!(
+    debug!(
         "Extracted preview from {} ({}x{}, {} bytes)",
         file_name,
         preview_width,
@@ -126,7 +293,7 @@ pub fn extract_preview(raw_path: &Path) -> Result<ImageRecord> {
         preview_data.len()
     );
 
-    Ok(ImageRecord {
+    ImageRecord {
         id,
         file_path: raw_path.to_path_buf(),
         file_name,
@@ -140,7 +307,7 @@ pub fn extract_preview(raw_path: &Path) -> Result<ImageRecord> {
         preview_height,
         orientation,
         preview_data,
-    })
+    }
 }
 
 // =============================================================================
@@ -179,31 +346,6 @@ pub fn with_orientation_tag(jpeg: &[u8], orientation: u8) -> Vec<u8> {
     out.extend_from_slice(&app1);
     out.extend_from_slice(&jpeg[2..]);
     out
-}
-
-pub fn extract_all(paths: &[PathBuf]) -> Result<Vec<ImageRecord>> {
-    let mut records = Vec::new();
-
-    for (i, path) in paths.iter().enumerate() {
-        match extract_preview(path) {
-            Ok(record) => records.push(record),
-            Err(e) => {
-                warn!(
-                    "Skipping {} ({}): {}",
-                    path.file_name().unwrap_or_default().to_string_lossy(),
-                    i + 1,
-                    e
-                );
-            }
-        }
-    }
-
-    info!(
-        "Successfully extracted {}/{} previews",
-        records.len(),
-        paths.len()
-    );
-    Ok(records)
 }
 
 /// Parses an EXIF `DateTimeOriginal` string ("YYYY:MM:DD HH:MM:SS") into
