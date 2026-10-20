@@ -32,7 +32,13 @@ pub struct FaceDetector {
 
 impl FaceDetector {
     pub fn new(model_path: &std::path::Path) -> Result<Self> {
-        let model = OnnxModel::load(model_path, "YOLOv8-face")?;
+        Self::with_threads(model_path, crate::runtime::available_cores())
+    }
+
+    /// Same as [`new`](Self::new) with the ONNX session limited to
+    /// `threads` threads (for running several detectors in parallel).
+    pub fn with_threads(model_path: &std::path::Path, threads: usize) -> Result<Self> {
+        let model = OnnxModel::load_with_threads(model_path, "YOLOv8-face", threads)?;
 
         info!("Face detector ready.");
 

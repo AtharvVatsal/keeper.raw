@@ -86,9 +86,22 @@ pub fn is_clear_blink(face_confidence: f32, left: f32, right: f32, threshold: f6
 impl BlinkDetector {
     /// Loads both models from `models_dir`.
     pub fn new(models_dir: &Path) -> Result<Self> {
-        let landmarks = OnnxModel::load(&models_dir.join(LANDMARK_MODEL_FILE), "FaceMesh V2")?;
-        let blendshapes =
-            OnnxModel::load(&models_dir.join(BLENDSHAPE_MODEL_FILE), "Blendshape V2")?;
+        Self::with_threads(models_dir, crate::runtime::available_cores())
+    }
+
+    /// Same as [`new`](Self::new) with each ONNX session limited to
+    /// `threads` threads (for running several detectors in parallel).
+    pub fn with_threads(models_dir: &Path, threads: usize) -> Result<Self> {
+        let landmarks = OnnxModel::load_with_threads(
+            &models_dir.join(LANDMARK_MODEL_FILE),
+            "FaceMesh V2",
+            threads,
+        )?;
+        let blendshapes = OnnxModel::load_with_threads(
+            &models_dir.join(BLENDSHAPE_MODEL_FILE),
+            "Blendshape V2",
+            threads,
+        )?;
         info!("Blink detector ready (FaceMesh V2 + Blendshape V2).");
         Ok(BlinkDetector {
             landmarks,

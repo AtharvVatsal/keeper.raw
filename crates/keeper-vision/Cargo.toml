@@ -18,7 +18,7 @@ image = "0.25"
 
 # Scaled JPEG decoding (IDCT scaling to 1/2, 1/4, 1/8) — zune-jpeg (used by
 # `image`) can only decode at full size.
-jpeg-decoder = "0.3"
+jpeg-decoder = { version = "0.3", default-features = false }
 
 # ndarray — the Rust equivalent of NumPy. ONNX models expect tensor inputs.
 ndarray = "0.17"

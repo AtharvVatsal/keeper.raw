@@ -1,9 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use keeper_core::config::CullConfig;
 use keeper_core::types::{ImageId, ImageRecord, ImageScore, RejectReason, Scene, Verdict};
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -28,9 +30,26 @@ pub struct CullManifest {
 }
 
 pub struct CullPipeline {
-    face_detector: Mutex<FaceDetector>,
-    blink_detector: Mutex<BlinkDetector>,
+    /// One set of models per worker thread; worker `i` only ever touches
+    /// `analyzers[i]`. ONNX sessions need `&mut` to run, so a single shared
+    /// set forced images through one at a time.
+    analyzers: Vec<Mutex<Analyzer>>,
     config: CullConfig,
+}
+
+/// One image's analysis: its score and pHash (`None` if it couldn't be decoded).
+type Analysis = (ImageScore, Option<ImageHash>);
+
+/// One worker's own copy of the models.
+struct Analyzer {
+    face: FaceDetector,
+    blink: BlinkDetector,
+}
+
+/// Default number of images analysed in parallel: half the logical cores
+/// (each worker's models also use a couple of threads), at most 8.
+pub fn default_workers() -> usize {
+    (crate::runtime::available_cores() / 2).clamp(1, 8)
 }
 
 /// Face detection model file inside the models directory.
@@ -53,25 +72,60 @@ pub fn missing_model_files(models_dir: &Path) -> Vec<&'static str> {
 }
 
 impl CullPipeline {
-    /// Loads all models from `models_dir` (see [`REQUIRED_MODEL_FILES`]).
+    /// Loads all models from `models_dir` (see [`REQUIRED_MODEL_FILES`]),
+    /// with [`default_workers`] parallel workers.
     pub fn new(models_dir: &Path, config: CullConfig) -> Result<Self> {
-        info!("Initializing CullPipeline from {:?}...", models_dir);
+        Self::with_workers(models_dir, config, default_workers())
+    }
 
-        let face_detector = FaceDetector::new(&models_dir.join(FACE_MODEL_FILE))
-            .context("Failed to load face detection model")?;
-        info!("  ✓ Face detector loaded");
+    /// Same as [`new`](Self::new) with an explicit number of parallel
+    /// workers (1 = analyse images one at a time).
+    pub fn with_workers(models_dir: &Path, config: CullConfig, workers: usize) -> Result<Self> {
+        let workers = workers.max(1);
+        // Split the cores between the workers' ONNX sessions.
+        let threads_per_model = (crate::runtime::available_cores() / workers).max(1);
+        info!(
+            "Initializing CullPipeline from {:?}: {} worker(s), {} thread(s) per model...",
+            models_dir, workers, threads_per_model
+        );
 
-        let blink_detector =
-            BlinkDetector::new(models_dir).context("Failed to load blink detection models")?;
-        info!("  ✓ Blink detector loaded");
+        // Load each worker's models in parallel (each set takes ~0.3 s).
+        let loaded: Vec<Result<Analyzer>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    scope.spawn(|| -> Result<Analyzer> {
+                        Ok(Analyzer {
+                            face: FaceDetector::with_threads(
+                                &models_dir.join(FACE_MODEL_FILE),
+                                threads_per_model,
+                            )
+                            .context("Failed to load face detection model")?,
+                            blink: BlinkDetector::with_threads(models_dir, threads_per_model)
+                                .context("Failed to load blink detection models")?,
+                        })
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .unwrap_or_else(|_| Err(anyhow!("model loading thread panicked")))
+                })
+                .collect()
+        });
+        let analyzers = loaded
+            .into_iter()
+            .map(|a| a.map(Mutex::new))
+            .collect::<Result<Vec<_>>>()?;
 
         info!("CullPipeline ready.");
+        Ok(CullPipeline { analyzers, config })
+    }
 
-        Ok(CullPipeline {
-            face_detector: Mutex::new(face_detector),
-            blink_detector: Mutex::new(blink_detector),
-            config,
-        })
+    /// Number of images analysed in parallel.
+    pub fn workers(&self) -> usize {
+        self.analyzers.len()
     }
 
     pub fn run(&self, images: &[ImageRecord]) -> Result<CullManifest> {
@@ -94,20 +148,63 @@ impl CullPipeline {
 
         // Analysis comes first: each preview is decoded ONCE and every stage
         // (pHash, face, focus, blink) works on that decode. Stacking then only
-        // needs timestamps + the stored hashes. Images are processed one at a
-        // time so only one decoded preview is in memory at once.
-        info!("Stage 1/3: Analyzing images (decode once → pHash, face, focus, blink)...");
+        // needs timestamps + the stored hashes. Images are analysed in
+        // parallel, one per worker, so at most `workers` decoded previews are
+        // in memory at once. Results come back in input order.
+        info!(
+            "Stage 1/3: Analyzing images (decode once → pHash, face, focus, blink) with {} worker(s)...",
+            self.workers()
+        );
+
+        // Plain worker threads (not a work-stealing pool): each one owns its
+        // analyzer for the whole run and pulls the next image index from a
+        // shared counter. A work-stealing pool deadlocked here: a worker
+        // holding its analyzer could steal another image's task while waiting
+        // on nested parallel work, and that task then waited on the same lock.
+        let next = AtomicUsize::new(0);
+        let done = AtomicUsize::new(0);
+        let per_worker: Vec<Vec<(usize, Analysis)>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = self
+                .analyzers
+                .iter()
+                .map(|slot| {
+                    let (next, done) = (&next, &done);
+                    scope.spawn(move || {
+                        let mut analyzer =
+                            slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let mut out = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(image) = images.get(i) else {
+                                break;
+                            };
+                            out.push((i, self.analyze_single_image(&mut analyzer, image)));
+
+                            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                            if n.is_multiple_of(100) || n == images.len() {
+                                info!("  Analysed {}/{} images", n, images.len());
+                            }
+                        }
+                        out
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("analysis worker panicked"))
+                .collect()
+        });
+
+        // Put results back in input order.
+        let mut analysed: Vec<(usize, Analysis)> = per_worker.into_iter().flatten().collect();
+        analysed.sort_unstable_by_key(|(i, _)| *i);
+        let analysed = analysed.into_iter().map(|(_, result)| result);
 
         let mut hashes: HashMap<ImageId, ImageHash> = HashMap::with_capacity(images.len());
         let mut image_scores: Vec<ImageScore> = Vec::with_capacity(images.len());
-
-        for (i, image) in images.iter().enumerate() {
-            if (i + 1) % 100 == 0 || i + 1 == images.len() {
-                info!("  Processing image {}/{}", i + 1, images.len());
-            }
-            let (score, hash) = self.analyze_single_image(image);
+        for (score, hash) in analysed {
             if let Some(hash) = hash {
-                hashes.insert(image.id, hash);
+                hashes.insert(score.image_id, hash);
             }
             image_scores.push(score);
         }
@@ -217,7 +314,7 @@ impl CullPipeline {
 
     /// Analyses one image from a single decode. Returns its score and its
     /// pHash (`None` if the preview couldn't be decoded).
-    fn analyze_single_image(&self, image: &ImageRecord) -> (ImageScore, Option<ImageHash>) {
+    fn analyze_single_image(&self, analyzer: &mut Analyzer, image: &ImageRecord) -> Analysis {
         let unscored = ImageScore {
             image_id: image.id,
             sharpness_score: 0.0,
@@ -265,7 +362,7 @@ impl CullPipeline {
 
         // ---- Face detection (on the small copy) -----------------------------
         let faces = {
-            let mut detector = self.face_detector.lock().unwrap();
+            let detector = &mut analyzer.face;
             match detector.detect_image(&decoded.small, self.config.face_detection_confidence, 0.45)
             {
                 Ok(f) => f,
@@ -300,7 +397,7 @@ impl CullPipeline {
         // `small` and `work` coordinates). Used to level the face crop.
         let roll = primary_face.map(head_roll).unwrap_or(0.0);
         let (blink_detected, blink_score) = if let Some(ref bbox) = work_bbox {
-            let mut detector = self.blink_detector.lock().unwrap();
+            let detector = &mut analyzer.blink;
             match detector.detect_blink_image(
                 &decoded.work,
                 bbox,

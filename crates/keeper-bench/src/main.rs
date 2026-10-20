@@ -6,7 +6,7 @@
 //!
 //! Usage:
 //!   keeper-bench [--input <dir>] [--runs <n>] [--warmup]
-//!                [--models <dir>] [--raw] [--manifest <file>]
+//!                [--models <dir>] [--raw] [--manifest <file>] [--workers <n>]
 //!
 //!   --input <dir>   Folder of images to benchmark (default: test-data)
 //!   --runs <n>      Number of timed pipeline runs (default: 3)
@@ -14,6 +14,7 @@
 //!   --models <dir>  Directory holding the ONNX models (default: models)
 //!   --raw           Treat input as RAW files and ingest via ExifTool.
 //!                   Default treats input files as JPEG previews directly.
+//!   --workers <n>   Images analysed in parallel (default: half the cores, max 8)
 //!   --manifest <file>  Write the last run's CullManifest plus an id → file
 //!                   name map as JSON, to compare verdicts between versions.
 
@@ -34,6 +35,7 @@ struct Args {
     warmup: bool,
     raw: bool,
     manifest_out: Option<PathBuf>,
+    workers: Option<usize>,
 }
 
 fn parse_args() -> Args {
@@ -61,6 +63,9 @@ fn parse_args() -> Args {
         warmup: argv.iter().any(|a| a == "--warmup"),
         raw: argv.iter().any(|a| a == "--raw"),
         manifest_out: value_after("--manifest").map(PathBuf::from),
+        workers: value_after("--workers")
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n > 0),
     }
 }
 
@@ -128,10 +133,17 @@ fn main() -> Result<()> {
 
     // ── Model load (pipeline init) ─────────────────────────────────────────
     let init_start = Instant::now();
-    let pipeline = CullPipeline::new(&args.models_dir, config.clone())
-        .context("Failed to initialize CullPipeline")?;
+    let pipeline = match args.workers {
+        Some(n) => CullPipeline::with_workers(&args.models_dir, config.clone(), n),
+        None => CullPipeline::new(&args.models_dir, config.clone()),
+    }
+    .context("Failed to initialize CullPipeline")?;
     let init_elapsed = init_start.elapsed();
-    println!("Model load (pipeline init): {}", fmt_duration(init_elapsed));
+    println!(
+        "Model load (pipeline init): {}  ({} worker(s))",
+        fmt_duration(init_elapsed),
+        pipeline.workers()
+    );
 
     // ── Stacking in isolation (cheap, CPU-only) ────────────────────────────
     let stack_start = Instant::now();

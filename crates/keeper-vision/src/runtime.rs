@@ -8,17 +8,31 @@ pub struct OnnxModel {
     pub name: String,
 }
 
+/// Number of logical CPU cores (4 if unknown).
+pub fn available_cores() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
+
 impl OnnxModel {
+    /// Loads a model whose session may use every core.
     pub fn load(model_path: &Path, name: &str) -> Result<Self> {
-        info!("Loading ONNX model '{}' from {:?}", name, model_path);
+        Self::load_with_threads(model_path, name, available_cores())
+    }
+
+    /// Loads a model whose session uses at most `intra_threads` threads.
+    /// When several sessions run side by side (one per pipeline worker),
+    /// giving each all cores would oversubscribe the CPU.
+    pub fn load_with_threads(model_path: &Path, name: &str, intra_threads: usize) -> Result<Self> {
+        info!(
+            "Loading ONNX model '{}' from {:?} ({} thread(s))",
+            name, model_path, intra_threads
+        );
 
         let session = Session::builder()
             .map_err(|e| anyhow!("Failed to create ONNX session builder: {e}"))?
-            .with_intra_threads(
-                std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(4),
-            )
+            .with_intra_threads(intra_threads.max(1))
             .map_err(|e| anyhow!("Failed to set thread count: {e}"))?
             .commit_from_file(model_path)
             .map_err(|e| anyhow!("Failed to load ONNX model from {:?}: {e}", model_path))?;
