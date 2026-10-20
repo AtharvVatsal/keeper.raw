@@ -239,68 +239,9 @@ impl CullPipeline {
                 .context("Scene stacking failed")?;
         info!("  → {} scenes created", scenes.len());
 
-        let score_map: HashMap<ImageId, &ImageScore> =
-            image_scores.iter().map(|s| (s.image_id, s)).collect();
-
         info!("Stage 3/3: Selecting keepers...");
-
-        for scene in &mut scenes {
-            // Unusable (black/blank) frames can never be a keeper.
-            let scene_scores: Vec<(u64, focus_scorer::FocusResult)> = scene
-                .image_ids
-                .iter()
-                .filter(|id| score_map.get(id).map(|s| !is_unusable(s)).unwrap_or(true))
-                .filter_map(|id| {
-                    score_map.get(id).map(|score| {
-                        (
-                            *id,
-                            focus_scorer::FocusResult {
-                                sharpness_score: score.sharpness_score,
-                                raw_variance: score.sharpness_score,
-                                noise_estimate: 1.0,
-                                scored_region: focus_scorer::ScoredRegion::CenterFallback,
-                            },
-                        )
-                    })
-                })
-                .collect();
-
-            let non_blink_scores: Vec<(u64, focus_scorer::FocusResult)> = scene_scores
-                .iter()
-                .filter(|(id, _)| score_map.get(id).map(|s| !s.blink_detected).unwrap_or(true))
-                .cloned()
-                .collect();
-
-            let keeper_id = if !non_blink_scores.is_empty() {
-                focus_scorer::pick_keeper(&non_blink_scores)
-            } else {
-                focus_scorer::pick_keeper(&scene_scores)
-            };
-
-            scene.keeper_id = keeper_id;
-
-            if let Some(kid) = keeper_id {
-                debug!("Scene {}: keeper = image {}", scene.id, kid);
-            }
-        }
-
         let mut final_scores = image_scores;
-
-        let keeper_ids: std::collections::HashSet<ImageId> =
-            scenes.iter().filter_map(|s| s.keeper_id).collect();
-
-        for score in &mut final_scores {
-            if is_unusable(score) {
-                continue; // keep its Reject { Unusable } verdict
-            }
-            if keeper_ids.contains(&score.image_id) {
-                score.verdict = Verdict::Keeper;
-            } else if score.blink_detected {
-                score.verdict = Verdict::Reject {
-                    reason: RejectReason::Blink,
-                };
-            }
-        }
+        select_keepers(&mut scenes, &mut final_scores);
 
         let total_keepers = final_scores
             .iter()
@@ -462,6 +403,59 @@ impl CullPipeline {
     }
 }
 
+/// Picks each scene's keeper and sets every image's verdict.
+///
+/// - Unusable (black/blank) frames keep their `Reject { Unusable }` verdict
+///   and are never a keeper.
+/// - The keeper is the sharpest frame that isn't a clear blink. If every
+///   usable frame blinked (including a lone frame), the scene has **no**
+///   keeper: clear blinks are always rejected (av's reject policy).
+/// - Blinks are `Reject { Blink }`; everything else is `Unrated`.
+pub fn select_keepers(scenes: &mut [Scene], scores: &mut [ImageScore]) {
+    let score_map: HashMap<ImageId, &ImageScore> = scores.iter().map(|s| (s.image_id, s)).collect();
+
+    for scene in scenes.iter_mut() {
+        let candidates: Vec<&ImageScore> = scene
+            .image_ids
+            .iter()
+            .filter_map(|id| score_map.get(id).copied())
+            .filter(|s| !is_unusable(s) && !s.blink_detected)
+            .collect();
+
+        scene.keeper_id = sharpest(&candidates);
+        if let Some(kid) = scene.keeper_id {
+            debug!("Scene {}: keeper = image {}", scene.id, kid);
+        }
+    }
+
+    let keeper_ids: std::collections::HashSet<ImageId> =
+        scenes.iter().filter_map(|s| s.keeper_id).collect();
+    for score in scores.iter_mut() {
+        if is_unusable(score) {
+            continue; // keep its Reject { Unusable } verdict
+        }
+        if keeper_ids.contains(&score.image_id) {
+            score.verdict = Verdict::Keeper;
+        } else if score.blink_detected {
+            score.verdict = Verdict::Reject {
+                reason: RejectReason::Blink,
+            };
+        }
+    }
+}
+
+/// The id of the sharpest image, if any (ties: the last one, as `max_by` does).
+fn sharpest(candidates: &[&ImageScore]) -> Option<ImageId> {
+    candidates
+        .iter()
+        .max_by(|a, b| {
+            a.sharpness_score
+                .partial_cmp(&b.sharpness_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|s| s.image_id)
+}
+
 /// True if analysis already rejected this image as a black/blank frame.
 fn is_unusable(score: &ImageScore) -> bool {
     matches!(
@@ -503,6 +497,80 @@ mod tests {
             confidence: 0.9,
             keypoints: vec![kp(a), kp(b)],
         }
+    }
+
+    fn score(id: ImageId, sharpness: f64, blink: bool) -> ImageScore {
+        ImageScore {
+            image_id: id,
+            sharpness_score: sharpness,
+            has_face: blink,
+            face_bbox: None,
+            blink_detected: blink,
+            blink_score: None,
+            verdict: Verdict::Unrated,
+        }
+    }
+
+    fn scene(id: u64, ids: &[ImageId]) -> Scene {
+        Scene {
+            id,
+            image_ids: ids.to_vec(),
+            keeper_id: None,
+        }
+    }
+
+    const BLINK: Verdict = Verdict::Reject {
+        reason: RejectReason::Blink,
+    };
+
+    #[test]
+    fn test_lone_sharp_photo_is_keeper() {
+        let mut scenes = vec![scene(1, &[1])];
+        let mut scores = vec![score(1, 50.0, false)];
+        select_keepers(&mut scenes, &mut scores);
+        assert_eq!(scenes[0].keeper_id, Some(1));
+        assert_eq!(scores[0].verdict, Verdict::Keeper);
+    }
+
+    #[test]
+    fn test_blink_never_beats_open_eyes() {
+        let mut scenes = vec![scene(1, &[1, 2])];
+        let mut scores = vec![score(1, 100.0, true), score(2, 10.0, false)];
+        select_keepers(&mut scenes, &mut scores);
+        assert_eq!(scenes[0].keeper_id, Some(2));
+        assert_eq!(scores[0].verdict, BLINK);
+    }
+
+    #[test]
+    fn test_lone_blink_is_rejected_not_kept() {
+        // A clear blink with no alternative is still a blink: reject it.
+        let mut scenes = vec![scene(1, &[1])];
+        let mut scores = vec![score(1, 50.0, true)];
+        select_keepers(&mut scenes, &mut scores);
+        assert_eq!(scenes[0].keeper_id, None);
+        assert_eq!(scores[0].verdict, BLINK);
+    }
+
+    #[test]
+    fn test_scene_where_everyone_blinked_has_no_keeper() {
+        let mut scenes = vec![scene(1, &[1, 2])];
+        let mut scores = vec![score(1, 50.0, true), score(2, 80.0, true)];
+        select_keepers(&mut scenes, &mut scores);
+        assert_eq!(scenes[0].keeper_id, None);
+        assert!(scores.iter().all(|s| s.verdict == BLINK));
+    }
+
+    #[test]
+    fn test_unusable_frame_is_never_keeper() {
+        let unusable = Verdict::Reject {
+            reason: RejectReason::Unusable,
+        };
+        let mut scenes = vec![scene(1, &[1, 2])];
+        let mut scores = vec![score(1, 900.0, false), score(2, 10.0, false)];
+        scores[0].verdict = unusable;
+        select_keepers(&mut scenes, &mut scores);
+        assert_eq!(scenes[0].keeper_id, Some(2));
+        assert_eq!(scores[0].verdict, unusable);
     }
 
     #[test]
