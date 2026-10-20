@@ -7,6 +7,7 @@
 //! Usage:
 //!   keeper-bench [--input <dir>] [--runs <n>] [--warmup]
 //!                [--models <dir>] [--raw] [--manifest <file>] [--workers <n>]
+//!                [--previews-on-disk]
 //!
 //!   --input <dir>   Folder of images to benchmark (default: test-data)
 //!   --runs <n>      Number of timed pipeline runs (default: 3)
@@ -14,6 +15,8 @@
 //!   --models <dir>  Directory holding the ONNX models (default: models)
 //!   --raw           Treat input as RAW files and ingest via ExifTool.
 //!                   Default treats input files as JPEG previews directly.
+//!   --previews-on-disk  With --raw: store previews as files (like the desktop
+//!                   app) instead of in memory.
 //!   --workers <n>   Images analysed in parallel (default: half the cores, max 8)
 //!   --manifest <file>  Write the last run's CullManifest plus an id → file
 //!                   name map as JSON, to compare verdicts between versions.
@@ -36,6 +39,7 @@ struct Args {
     raw: bool,
     manifest_out: Option<PathBuf>,
     workers: Option<usize>,
+    previews_on_disk: bool,
 }
 
 fn parse_args() -> Args {
@@ -63,6 +67,7 @@ fn parse_args() -> Args {
         warmup: argv.iter().any(|a| a == "--warmup"),
         raw: argv.iter().any(|a| a == "--raw"),
         manifest_out: value_after("--manifest").map(PathBuf::from),
+        previews_on_disk: argv.iter().any(|a| a == "--previews-on-disk"),
         workers: value_after("--workers")
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|n| *n > 0),
@@ -84,10 +89,10 @@ fn main() -> Result<()> {
     );
     println!(
         "Mode:    {}",
-        if args.raw {
-            "RAW (ExifTool)"
-        } else {
-            "JPEG previews"
+        match (args.raw, args.previews_on_disk) {
+            (true, true) => "RAW (ExifTool), previews on disk",
+            (true, false) => "RAW (ExifTool), previews in memory",
+            _ => "JPEG previews",
         }
     );
     println!();
@@ -104,7 +109,15 @@ fn main() -> Result<()> {
 
     // ── Load images ────────────────────────────────────────────────────────
     let load_start = Instant::now();
-    let images = if args.raw {
+    // Kept alive until the end of main so on-disk previews stay readable.
+    let preview_dir =
+        std::env::temp_dir().join(format!("keeper-bench-previews-{}", std::process::id()));
+    let images = if args.raw && args.previews_on_disk {
+        let records = keeper_ingest::ingest_directory_to(&args.input_dir, &preview_dir)
+            .context("Failed to ingest RAW files. Is ExifTool installed and on PATH?")?;
+        keeper_ingest::tag_preview_files(&records)?;
+        records
+    } else if args.raw {
         keeper_ingest::ingest_directory(&args.input_dir)
             .context("Failed to ingest RAW files. Is ExifTool installed and on PATH?")?
     } else {
@@ -145,16 +158,10 @@ fn main() -> Result<()> {
         pipeline.workers()
     );
 
-    // ── Stacking in isolation (cheap, CPU-only) ────────────────────────────
-    let stack_start = Instant::now();
-    let scenes =
-        keeper_stacker::stacker::stack_scenes(&images, &config).context("Scene stacking failed")?;
-    let stack_elapsed = stack_start.elapsed();
-    println!(
-        "Stacking (standalone):      {}  → {} scenes",
-        fmt_duration(stack_elapsed),
-        scenes.len()
-    );
+    // (Stacking is timed as part of each pipeline run: it reuses the pHashes
+    // computed during analysis. The old standalone-stacking measurement
+    // re-decoded every full preview on one thread — ~15 min for 3,000 images
+    // — and timed a code path the app no longer uses, so it was removed.)
     println!();
 
     // ── Timed pipeline runs ────────────────────────────────────────────────
@@ -207,10 +214,6 @@ fn main() -> Result<()> {
     println!();
     println!("Model load:        {}", fmt_duration(init_elapsed));
     println!("Image load:        {}", fmt_duration(load_elapsed));
-    // Standalone stacking decodes previews itself; inside the pipeline it
-    // reuses hashes computed during analysis, so it is not part of the run
-    // time below in the same way.
-    println!("Stacking (standalone): {}", fmt_duration(stack_elapsed));
     println!();
     println!("Pipeline wall time ({} runs):", wall_times.len());
     println!("  min: {}", fmt_duration(min));
@@ -237,6 +240,7 @@ fn main() -> Result<()> {
         println!("Manifest written to {:?}", path);
     }
 
+    let _ = std::fs::remove_dir_all(&preview_dir);
     Ok(())
 }
 
@@ -290,6 +294,7 @@ fn load_jpeg_images(dir: &Path) -> Result<Vec<ImageRecord>> {
             preview_height: 0,
             orientation: keeper_vision::preprocess::jpeg_orientation(&preview_data),
             preview_data,
+            preview_file: None,
         });
     }
 

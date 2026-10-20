@@ -325,7 +325,16 @@ impl CullPipeline {
             verdict: Verdict::Unrated,
         };
 
-        if image.preview_data.is_empty() {
+        // In memory, or read from disk now — only while this image is being
+        // analysed, so at most one preview per worker is in RAM.
+        let preview = match image.load_preview() {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                warn!("Could not read preview for '{}': {}", image.file_name, e);
+                return (unscored, None);
+            }
+        };
+        if preview.is_empty() {
             warn!(
                 "Image '{}' has no preview data — skipping analysis",
                 image.file_name
@@ -334,8 +343,7 @@ impl CullPipeline {
         }
 
         // ---- Decode once ----------------------------------------------------
-        let decoded = match preprocess::decode_for_analysis(&image.preview_data, image.orientation)
-        {
+        let decoded = match preprocess::decode_for_analysis(&preview, image.orientation) {
             Ok(d) => d,
             Err(e) => {
                 warn!("Could not decode preview for '{}': {}", image.file_name, e);

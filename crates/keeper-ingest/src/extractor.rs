@@ -45,10 +45,31 @@ pub fn extract_preview(raw_path: &Path) -> Result<ImageRecord> {
         .ok_or_else(|| anyhow!("No embedded preview found in {}", raw_path.display()))
 }
 
-/// Extracts previews and metadata for all `paths`, in order. Files without
-/// an embedded preview are skipped with a warning. Fails only if exiftool
-/// can't be run at all.
+/// Extracts previews and metadata for all `paths`, in order, keeping each
+/// preview in memory (`ImageRecord::preview_data`). Files without an
+/// embedded preview are skipped with a warning. Fails only if exiftool can't
+/// be run at all.
 pub fn extract_all(paths: &[PathBuf]) -> Result<Vec<ImageRecord>> {
+    extract_all_with(paths, PreviewStore::Memory)
+}
+
+/// Same as [`extract_all`], but each preview is moved into `preview_dir` as
+/// `<id>.jpg` and referenced by `ImageRecord::preview_file` instead of being
+/// held in memory. Previews are never read into RAM during ingest.
+pub fn extract_all_to_dir(paths: &[PathBuf], preview_dir: &Path) -> Result<Vec<ImageRecord>> {
+    std::fs::create_dir_all(preview_dir)
+        .with_context(|| format!("Failed to create {}", preview_dir.display()))?;
+    extract_all_with(paths, PreviewStore::Directory(preview_dir))
+}
+
+/// Where extracted previews end up.
+#[derive(Clone, Copy)]
+enum PreviewStore<'a> {
+    Memory,
+    Directory(&'a Path),
+}
+
+fn extract_all_with(paths: &[PathBuf], store: PreviewStore) -> Result<Vec<ImageRecord>> {
     if paths.is_empty() {
         return Ok(vec![]);
     }
@@ -84,11 +105,24 @@ pub fn extract_all(paths: &[PathBuf]) -> Result<Vec<ImageRecord>> {
     let mut records = Vec::with_capacity(paths.len());
     for (chunk, result) in paths.chunks(chunk_size).zip(results) {
         let output = result?;
-        for ((path, preview), exif) in chunk.iter().zip(output.previews).zip(output.metadata) {
-            match preview {
-                Some(preview_data) => records.push(build_record(path, preview_data, &exif)),
-                None => warn!("Skipping {}: no embedded preview found", path.display()),
-            }
+        for ((path, written), exif) in chunk.iter().zip(output.previews).zip(output.metadata) {
+            let Some(written) = written else {
+                warn!("Skipping {}: no embedded preview found", path.display());
+                continue;
+            };
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let preview = match store {
+                PreviewStore::Memory => Preview::Bytes(
+                    std::fs::read(&written)
+                        .with_context(|| format!("Failed to read {}", written.display()))?,
+                ),
+                PreviewStore::Directory(dir) => {
+                    let dest = dir.join(format!("{id}.jpg"));
+                    move_file(&written, &dest)?;
+                    Preview::File(dest)
+                }
+            };
+            records.push(build_record(id, path, preview, &exif));
         }
     }
 
@@ -103,7 +137,8 @@ pub fn extract_all(paths: &[PathBuf]) -> Result<Vec<ImageRecord>> {
 
 /// What one exiftool worker produced, one entry per input path.
 struct ChunkOutput {
-    previews: Vec<Option<Vec<u8>>>,
+    /// The preview file exiftool wrote for each input (in the temp folder).
+    previews: Vec<Option<PathBuf>>,
     metadata: Vec<serde_json::Value>,
 }
 
@@ -111,7 +146,7 @@ fn extract_chunk(paths: &[PathBuf], dir: &Path) -> Result<ChunkOutput> {
     std::fs::create_dir_all(dir)?;
 
     // ---- Previews: one call per tag, only for files still missing one -------
-    let mut previews: Vec<Option<Vec<u8>>> = vec![None; paths.len()];
+    let mut previews: Vec<Option<PathBuf>> = vec![None; paths.len()];
     for tag in PREVIEW_TAGS {
         let missing: Vec<usize> = (0..paths.len())
             .filter(|&i| previews[i].is_none())
@@ -132,10 +167,12 @@ fn extract_chunk(paths: &[PathBuf], dir: &Path) -> Result<ChunkOutput> {
 
         for &i in &missing {
             let file_name = paths[i].file_name().unwrap_or_default().to_string_lossy();
-            if let Ok(bytes) = std::fs::read(tag_dir.join(format!("{file_name}.jpg"))) {
-                if !bytes.is_empty() {
-                    previews[i] = Some(bytes);
-                }
+            let written = tag_dir.join(format!("{file_name}.jpg"));
+            let non_empty = std::fs::metadata(&written)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false);
+            if non_empty {
+                previews[i] = Some(written);
             }
         }
     }
@@ -228,24 +265,56 @@ impl Drop for TempDir {
     }
 }
 
+/// A preview either held in memory or stored as a file.
+enum Preview {
+    Bytes(Vec<u8>),
+    File(PathBuf),
+}
+
+/// Moves `from` to `to`; falls back to copy + delete across volumes.
+fn move_file(from: &Path, to: &Path) -> Result<()> {
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(from, to)
+        .with_context(|| format!("Failed to copy {} to {}", from.display(), to.display()))?;
+    let _ = std::fs::remove_file(from);
+    Ok(())
+}
+
 /// Builds an `ImageRecord` from a preview and exiftool's JSON for one file.
-fn build_record(raw_path: &Path, preview_data: Vec<u8>, exif: &serde_json::Value) -> ImageRecord {
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+fn build_record(
+    id: u64,
+    raw_path: &Path,
+    preview: Preview,
+    exif: &serde_json::Value,
+) -> ImageRecord {
     let file_name = raw_path
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
 
+    // Only the JPEG header is read to get the size, also for files on disk.
     let (preview_width, preview_height) = {
         use image::ImageReader;
         use std::io::Cursor;
 
-        ImageReader::new(Cursor::new(&preview_data))
-            .with_guessed_format()
-            .ok()
-            .and_then(|reader| reader.into_dimensions().ok())
-            .unwrap_or((0, 0))
+        match &preview {
+            Preview::Bytes(bytes) => ImageReader::new(Cursor::new(bytes))
+                .with_guessed_format()
+                .ok()
+                .and_then(|reader| reader.into_dimensions().ok()),
+            Preview::File(path) => ImageReader::open(path)
+                .ok()
+                .and_then(|reader| reader.with_guessed_format().ok())
+                .and_then(|reader| reader.into_dimensions().ok()),
+        }
+        .unwrap_or((0, 0))
+    };
+    let (preview_data, preview_file) = match preview {
+        Preview::Bytes(bytes) => (bytes, None),
+        Preview::File(path) => (Vec::new(), Some(path)),
     };
 
     let timestamp = exif
@@ -286,11 +355,8 @@ fn build_record(raw_path: &Path, preview_data: Vec<u8>, exif: &serde_json::Value
         .unwrap_or(1);
 
     debug!(
-        "Extracted preview from {} ({}x{}, {} bytes)",
-        file_name,
-        preview_width,
-        preview_height,
-        preview_data.len()
+        "Extracted preview from {} ({}x{})",
+        file_name, preview_width, preview_height
     );
 
     ImageRecord {
@@ -307,6 +373,7 @@ fn build_record(raw_path: &Path, preview_data: Vec<u8>, exif: &serde_json::Value
         preview_height,
         orientation,
         preview_data,
+        preview_file,
     }
 }
 
@@ -402,6 +469,7 @@ mod tests {
             preview_height: 0,
             orientation: 1,
             preview_data: vec![],
+            preview_file: None,
         }
     }
 

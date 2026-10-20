@@ -40,6 +40,7 @@ fn make_record(id: u64, name: &str, timestamp_ms: Option<i64>, data: Vec<u8>) ->
         preview_height: 0,
         orientation: keeper_vision::preprocess::jpeg_orientation(&data),
         preview_data: data,
+        preview_file: None,
     }
 }
 

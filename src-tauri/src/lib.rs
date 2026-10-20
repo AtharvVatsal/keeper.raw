@@ -101,21 +101,40 @@ async fn ingest_folder(
         return Err(format!("Not a valid folder: {}", path));
     }
 
-    let records = keeper_ingest::ingest_directory(&dir).map_err(|e| e.to_string())?;
+    // Previews live on disk only (one folder per opened folder), never in
+    // RAM: ~1.5 MB each would mean ~4.4 GB for a 3,000-image shoot. The webview
+    // displays these files and the pipeline reads them while analysing.
+    let previews_root = std::env::temp_dir().join("keeper-raw-previews");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let preview_dir = previews_root.join(format!("ingest-{nanos}"));
 
-    let preview_dir = std::env::temp_dir().join("keeper-raw-previews");
-    fs::create_dir_all(&preview_dir).map_err(|e| e.to_string())?;
+    let records =
+        keeper_ingest::ingest_directory_to(&dir, &preview_dir).map_err(|e| e.to_string())?;
+    // Tag rotated shots so the webview displays them upright (embedded
+    // previews have no EXIF of their own).
+    keeper_ingest::tag_preview_files(&records).map_err(|e| e.to_string())?;
+
+    // The new folder ingested fine: delete previews from earlier folders.
+    if let Ok(entries) = fs::read_dir(&previews_root) {
+        for entry in entries.flatten() {
+            if entry.path() != preview_dir {
+                let path = entry.path();
+                let _ = if path.is_dir() {
+                    fs::remove_dir_all(&path)
+                } else {
+                    fs::remove_file(&path)
+                };
+            }
+        }
+    }
 
     let summaries = records
         .iter()
         .map(|r| {
-            let preview_path = preview_dir.join(format!("{}.jpg", r.id));
-            // Tag the preview with the shot's orientation so the webview
-            // displays portrait shots upright (embedded previews have no EXIF).
-            let preview_bytes = keeper_ingest::with_orientation_tag(&r.preview_data, r.orientation);
-            if let Err(e) = fs::write(&preview_path, &preview_bytes) {
-                eprintln!("Warning: could not save preview for {}: {}", r.file_name, e);
-            }
+            let preview_path = r.preview_file.clone().unwrap_or_default();
 
             // Upright size: matches what the webview shows and the face boxes
             // the pipeline returns (both are in upright coordinates).

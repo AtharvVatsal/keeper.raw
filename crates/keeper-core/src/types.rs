@@ -23,11 +23,31 @@ pub struct ImageRecord {
     /// 270° CW). Embedded RAW previews are stored un-rotated, so this must be
     /// applied before analysis or display.
     pub orientation: u8,
+    /// The embedded preview JPEG held in memory. Empty when the preview
+    /// lives on disk instead (see `preview_file`).
     #[serde(skip)]
     pub preview_data: Vec<u8>,
+    /// The preview JPEG on disk. The desktop app keeps previews only here —
+    /// holding every full-size preview in RAM (~1.5 MB each) would need
+    /// ~4.4 GB for a 3,000-image shoot.
+    #[serde(skip)]
+    pub preview_file: Option<PathBuf>,
 }
 
 impl ImageRecord {
+    /// The preview JPEG bytes: borrowed from memory if held there, otherwise
+    /// read from `preview_file`. Empty if the record has neither.
+    pub fn load_preview(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+        use std::borrow::Cow;
+        if !self.preview_data.is_empty() {
+            return Ok(Cow::Borrowed(&self.preview_data));
+        }
+        match &self.preview_file {
+            Some(path) => std::fs::read(path).map(Cow::Owned),
+            None => Ok(Cow::Borrowed(&[])),
+        }
+    }
+
     /// EXIF orientations 5–8 swap width and height.
     pub fn is_rotated_quarter_turn(&self) -> bool {
         (5..=8).contains(&self.orientation)

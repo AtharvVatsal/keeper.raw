@@ -9,12 +9,9 @@ use crate::hasher::{self, ImageHash};
 /// Groups images into Scenes, decoding previews to compute pHashes as needed
 /// (only for images that share a time cluster with others).
 pub fn stack_scenes(images: &[ImageRecord], config: &CullConfig) -> Result<Vec<Scene>> {
-    stack_scenes_by(images, config, |record| {
-        if record.preview_data.is_empty() {
-            None
-        } else {
-            hasher::try_compute_phash(&record.preview_data, &record.file_name)
-        }
+    stack_scenes_by(images, config, |record| match record.load_preview() {
+        Ok(bytes) if !bytes.is_empty() => hasher::try_compute_phash(&bytes, &record.file_name),
+        _ => None,
     })
 }
 
@@ -202,6 +199,7 @@ mod tests {
             preview_height: 0,
             orientation: 1,
             preview_data: vec![],
+            preview_file: None,
         }
     }
 
