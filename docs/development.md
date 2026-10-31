@@ -58,13 +58,22 @@ cargo clippy --workspace -- -D warnings
 # Format
 cargo fmt --all
 
-# Build the installers (models from models/ are packed inside)
+# Download ExifTool for this OS into vendor/exiftool/ (once; it ships inside the installer)
+python scripts/fetch_exiftool.py
+
+# Build the installers (models from models/ and ExifTool from vendor/ are packed inside)
 npm run package
 ```
 
 `npm run package` runs `tauri build` with `src-tauri/tauri.bundle.conf.json`, which lists the
-model files to put in the installer. They're kept out of the main `tauri.conf.json` because the
-models aren't in git: listing them there would make every build without them (e.g. CI) fail.
+model files and the ExifTool folder to put in the installer. They're kept out of the main
+`tauri.conf.json` because neither is in git: listing them there would make every build without
+them (e.g. CI) fail.
+
+The installed app only uses its own ExifTool (pinned version, checksum-verified by the script).
+`cargo tauri dev` uses `vendor/exiftool/` if present, otherwise `exiftool` from your PATH.
+ExifTool is © Phil Harvey and redistributed under the same terms as Perl (Artistic License or
+GPL); the Windows package includes Strawberry Perl, whose licences ship in `exiftool_files/`.
 Installers land in `target/release/bundle/` (`.msi` and `-setup.exe` on Windows).
 
 ## Project Structure

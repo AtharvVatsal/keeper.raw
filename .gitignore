@@ -65,3 +65,6 @@ keeper-raw-previews/
 .env
 .env.local
 .env.*.local
+
+# Third-party tools downloaded for the installer (scripts/fetch_exiftool.py)
+vendor/

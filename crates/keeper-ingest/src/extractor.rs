@@ -4,9 +4,80 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use tracing::{debug, info, warn};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+// =============================================================================
+// Which ExifTool to run
+//
+// The installed app ships its own ExifTool (see scripts/fetch_exiftool.py) and
+// calls `use_exiftool` at start-up. Until then — tests, keeper-bench, a dev
+// checkout without vendor/ — `exiftool` from the PATH is used.
+// =============================================================================
+
+static CHOSEN_EXIFTOOL: OnceLock<ExifToolCommand> = OnceLock::new();
+
+/// How to start one particular copy of ExifTool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExifToolCommand {
+    pub program: PathBuf,
+    /// Arguments that come before ExifTool's own (the script, when run via perl).
+    pub prefix_args: Vec<PathBuf>,
+}
+
+impl ExifToolCommand {
+    /// The ExifTool copy in `dir`, if there is one:
+    /// - Windows package: `exiftool.exe` (+ its own Perl in `exiftool_files/`)
+    /// - Perl distribution (macOS / Linux): the `exiftool` script, started with
+    ///   the system's `perl` so it needn't be marked executable.
+    pub fn in_dir(dir: &Path) -> Option<Self> {
+        let exe = dir.join("exiftool.exe");
+        if cfg!(windows) && exe.is_file() {
+            return Some(ExifToolCommand {
+                program: exe,
+                prefix_args: vec![],
+            });
+        }
+        let script = dir.join("exiftool");
+        if script.is_file() && dir.join("lib").is_dir() {
+            return Some(ExifToolCommand {
+                program: PathBuf::from("perl"),
+                prefix_args: vec![script],
+            });
+        }
+        None
+    }
+}
+
+/// Use this ExifTool for every later call instead of the one on the PATH.
+/// Only the first call has an effect; returns false if one was already set.
+pub fn use_exiftool(command: ExifToolCommand) -> bool {
+    info!("Using ExifTool: {:?}", command);
+    CHOSEN_EXIFTOOL.set(command).is_ok()
+}
+
+/// A `Command` that starts the chosen ExifTool (or the one on the PATH).
+fn exiftool_command() -> Command {
+    let mut cmd = match CHOSEN_EXIFTOOL.get() {
+        Some(chosen) => {
+            let mut cmd = Command::new(&chosen.program);
+            cmd.args(&chosen.prefix_args);
+            cmd
+        }
+        None => Command::new("exiftool"),
+    };
+    // ExifTool is a console program. Started from the windowed app, Windows
+    // would flash a black console window for every call.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 
 // =============================================================================
 // Batch extraction with ExifTool
@@ -229,13 +300,16 @@ fn write_argfile<'a>(
 /// Runs exiftool on the files listed in `argfile` and returns its stdout.
 /// A non-zero exit (e.g. some files lacked the tag) is not an error.
 fn run_exiftool(args: &[&str], argfile: &Path) -> Result<Vec<u8>> {
-    let output = Command::new("exiftool")
+    let output = exiftool_command()
         .args(["-q", "-q", "-charset", "filename=utf8"])
         .args(args)
         .arg("-@")
         .arg(argfile)
         .output()
-        .context("Failed to run exiftool. Is it installed and in your PATH?")?;
+        .with_context(|| match CHOSEN_EXIFTOOL.get() {
+            Some(chosen) => format!("Failed to run the bundled ExifTool ({:?})", chosen),
+            None => "Failed to run exiftool. Is it installed and in your PATH?".to_string(),
+        })?;
     Ok(output.stdout)
 }
 
@@ -454,6 +528,45 @@ fn days_from_date(year: i32, month: u32, day: u32) -> Option<i64> {
 mod tests {
     use super::*;
     use keeper_core::config::CullConfig;
+
+    /// A fresh temp folder containing the given (empty) files.
+    fn folder_with(name: &str, files: &[&str]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("keeper-raw-exiftool-test-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        for f in files {
+            let path = dir.join(f);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"").unwrap();
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_perl_distribution_runs_script_with_perl() {
+        let dir = folder_with("perl", &["exiftool", "lib/Image/ExifTool.pm"]);
+        let cmd = ExifToolCommand::in_dir(&dir).unwrap();
+        assert_eq!(cmd.program, PathBuf::from("perl"));
+        assert_eq!(cmd.prefix_args, vec![dir.join("exiftool")]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_package_runs_the_exe() {
+        let dir = folder_with("windows", &["exiftool.exe", "exiftool_files/perl.exe"]);
+        let cmd = ExifToolCommand::in_dir(&dir).unwrap();
+        assert_eq!(cmd.program, dir.join("exiftool.exe"));
+        assert!(cmd.prefix_args.is_empty());
+    }
+
+    #[test]
+    fn test_folder_without_exiftool_is_none() {
+        // A lone script without its lib/ folder can't run either.
+        let empty = folder_with("empty", &[]);
+        let no_lib = folder_with("no-lib", &["exiftool"]);
+        assert_eq!(ExifToolCommand::in_dir(&empty), None);
+        assert_eq!(ExifToolCommand::in_dir(&no_lib), None);
+    }
 
     fn record_at(id: u64, exif_datetime: &str) -> ImageRecord {
         ImageRecord {

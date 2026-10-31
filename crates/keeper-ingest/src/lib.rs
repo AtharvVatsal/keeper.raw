@@ -1,5 +1,5 @@
 pub mod extractor;
-pub use extractor::with_orientation_tag;
+pub use extractor::{use_exiftool, with_orientation_tag, ExifToolCommand};
 pub mod scanner;
 
 use anyhow::Context;

@@ -146,11 +146,69 @@ fn find_models_dir(candidates: &[PathBuf]) -> Result<PathBuf, String> {
     ))
 }
 
+// =============================================================================
+// Finding ExifTool
+//
+// Same idea as the models: the installer ships ExifTool in the resource
+// folder (fetched by scripts/fetch_exiftool.py). Debug builds also try the
+// repo's vendor/exiftool/ and finally whatever `exiftool` is on the PATH.
+// Release builds never use the PATH copy, so a missing bundled copy shows up
+// on the developer's PC too instead of only on users' machines.
+// =============================================================================
+
+/// Why ExifTool can't be used, if it can't (checked once at start-up).
+struct ExifToolProblem(Option<String>);
+
+fn exiftool_dir_candidates(app: &AppHandle) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(resources) = app.path().resource_dir() {
+        dirs.push(resources.join("exiftool"));
+    }
+    if cfg!(debug_assertions) {
+        dirs.push(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("vendor")
+                .join("exiftool"),
+        );
+    }
+    dirs
+}
+
+/// Picks the ExifTool to use for the whole session.
+fn choose_exiftool(app: &AppHandle) -> ExifToolProblem {
+    let candidates = exiftool_dir_candidates(app);
+    match candidates
+        .iter()
+        .find_map(|d| keeper_ingest::ExifToolCommand::in_dir(d))
+    {
+        Some(command) => {
+            keeper_ingest::use_exiftool(command);
+            ExifToolProblem(None)
+        }
+        // `cargo tauri dev` without vendor/: fall back to the PATH.
+        None if cfg!(debug_assertions) => ExifToolProblem(None),
+        None => ExifToolProblem(Some(format!(
+            "ExifTool, which keeper.raw uses to read RAW files, is missing from this \
+             installation (looked in: {}). Please reinstall keeper.raw.",
+            candidates
+                .iter()
+                .map(|d| format!("'{}'", d.display()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
 #[command]
 async fn ingest_folder(
     path: String,
     state: State<'_, AppState>,
+    exiftool: State<'_, ExifToolProblem>,
 ) -> Result<Vec<ImageSummary>, String> {
+    if let Some(problem) = &exiftool.0 {
+        return Err(problem.clone());
+    }
     let dir = std::path::PathBuf::from(&path);
 
     if !dir.is_dir() {
@@ -329,6 +387,11 @@ pub fn run() {
         .manage(AppState {
             images: Mutex::new(vec![]),
             config: Mutex::new(initial_config),
+        })
+        .setup(|app| {
+            let problem = choose_exiftool(app.handle());
+            app.manage(problem);
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             ingest_folder,

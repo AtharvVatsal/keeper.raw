@@ -99,7 +99,8 @@ npm install
 # Run in development mode
 cargo tauri dev
 
-# Build the installers (bundles the models)
+# Build the installers (bundles the models and ExifTool)
+python scripts/fetch_exiftool.py
 npm run package
 ```
 

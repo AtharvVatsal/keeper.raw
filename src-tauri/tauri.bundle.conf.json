@@ -6,7 +6,8 @@
       "../models/face_landmarks_detector.onnx": "models/face_landmarks_detector.onnx",
       "../models/face_blendshapes.onnx": "models/face_blendshapes.onnx",
       "../models/clip_vit_b32_image.onnx": "models/clip_vit_b32_image.onnx",
-      "../models/clip_prompts.json": "models/clip_prompts.json"
+      "../models/clip_prompts.json": "models/clip_prompts.json",
+      "../vendor/exiftool": "exiftool"
     }
   }
 }
