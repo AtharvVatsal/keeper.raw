@@ -76,6 +76,15 @@ pub struct ImageScore {
     /// How sharp the sharpest part of the photo is (see
     /// `keeper_vision::quality::peak_sharpness`); below 500 = out of focus.
     pub peak_sharpness: f64,
+    /// How likely the photo is an accidental / test shot (0..1, see
+    /// `keeper_vision::accidental`). `None` when not checked — photos with a
+    /// face are never treated as accidental.
+    #[serde(default)]
+    pub accidental_score: Option<f64>,
+    /// True when `accidental_score` reached the threshold. Such a photo is
+    /// never chosen as the keeper; it stays unrated (never rejected).
+    #[serde(default)]
+    pub likely_accidental: bool,
     pub verdict: Verdict,
 }
 

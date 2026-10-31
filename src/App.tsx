@@ -33,6 +33,8 @@ interface ImageScore {
   blink_detected: boolean;
   blink_score: number | null;
   peak_sharpness: number;
+  accidental_score: number | null;
+  likely_accidental: boolean;
   verdict: Verdict;
 }
 
@@ -94,6 +96,33 @@ function FaceConfidenceWarning({ confidence }: { confidence: number }) {
       faces score below {FACE_CONFIDENCE_WARN_ABOVE * 100}%, so they will be
       missed and their blinks won't be caught. Default: 50%.
     </p>
+  );
+}
+
+// =============================================================================
+// "TEST SHOT?" BADGE
+//
+// Photos the AI thinks were taken by accident (the floor, a desk, a phone...)
+// are never made keepers, but they are NOT rejected either — the badge tells
+// the user why an unrated photo wasn't picked. Press K to keep it anyway.
+// =============================================================================
+function AccidentalBadge({ fontSize }: { fontSize: number }) {
+  return (
+    <span
+      title="Looks like an accidental or test shot, so it was not picked as a keeper. Press K in the loupe to keep it anyway."
+      style={{
+        fontSize,
+        fontWeight: "bold",
+        color: "#9ca3af",
+        border: "1px solid #4b5563",
+        padding: "1px 6px",
+        borderRadius: 3,
+        marginLeft: 8,
+        flexShrink: 0,
+      }}
+    >
+      TEST SHOT?
+    </span>
   );
 }
 
@@ -669,6 +698,9 @@ function LoupeView({
                 REJECT
               </span>
             )}
+            {effectiveVerdict === "unrated" && score?.likely_accidental && (
+              <AccidentalBadge fontSize={11} />
+            )}
           </div>
 
           <p style={{ margin: "3px 0 0 0", fontSize: 11, color: "#888" }}>
@@ -1073,6 +1105,9 @@ function ImageCard({
             >
               REJECT
             </span>
+          )}
+          {verdict === "unrated" && score?.likely_accidental && (
+            <AccidentalBadge fontSize={10} />
           )}
         </div>
 

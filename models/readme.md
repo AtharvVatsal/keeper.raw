@@ -9,6 +9,8 @@ This directory contains the ONNX models used by keeper.raw. These files are **no
 | YOLOv8-nano Face | `yolov8n-face.onnx` | ~12 MB | Face detection + 5 face keypoints | AGPL-3.0 ⚠️ (to be replaced before public release) |
 | MediaPipe FaceMesh V2 | `face_landmarks_detector.onnx` | ~5 MB | 478 facial landmarks | Apache-2.0 |
 | MediaPipe Blendshape V2 | `face_blendshapes.onnx` | ~2 MB | 52 expression scores, incl. `eyeBlinkLeft` / `eyeBlinkRight` (blink detection) | Apache-2.0 |
+| CLIP ViT-B/32 image encoder (int8) | `clip_vit_b32_image.onnx` | ~89 MB | Accidental / test-shot detection | MIT |
+| CLIP descriptions | `clip_prompts.json` | ~0.2 MB | The accidental / deliberate descriptions, pre-encoded by CLIP's text encoder | MIT (derived from CLIP) |
 
 `mobilenetv2-12.onnx` is only used by `crates/keeper-vision/tests/onnx_smoke_test.rs` (an ONNX Runtime smoke test) and is optional.
 
@@ -36,6 +38,22 @@ target\mediapipe-venv\Scripts\python models\convert_mediapipe.py
 The conversion was checked against the original TFLite models: landmark outputs agree to
 within 0.0004 px and blendshape scores to within 0.000002.
 
+#### CLIP ViT-B/32 (accidental-shot detection)
+
+Built from OpenAI's original CLIP weights (loaded through `open_clip`). The script exports the
+image encoder to ONNX, quantises its weights to int8 (per channel; 4× smaller) and pre-encodes
+the descriptions with the text encoder, so the app never needs the text half. PowerShell, from
+the repo root:
+
+```powershell
+python -m venv target\clip-venv
+target\clip-venv\Scripts\python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+target\clip-venv\Scripts\python -m pip install open_clip_torch onnx onnxruntime
+target\clip-venv\Scripts\python models\convert_clip.py
+```
+
+The descriptions live in `convert_clip.py`; rerun the script after changing them.
+
 #### YOLOv8-nano Face
 ```bash
 pip install ultralytics
@@ -47,6 +65,9 @@ model.export(format='onnx', imgsz=640, simplify=True)
 ```
 
 ## Licences
+
+- **CLIP** — [MIT](https://github.com/openai/CLIP/blob/main/LICENSE), © 2021 OpenAI.
+  Redistribution requires including the MIT licence text.
 
 - **MediaPipe FaceMesh V2 and Blendshape V2** — Apache License 2.0, per Google's model cards
   ([FaceMesh V2](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Face%20Mesh%20V2.pdf),

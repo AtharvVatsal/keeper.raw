@@ -1,8 +1,9 @@
 //! Computer vision pipeline for keeper.raw.
 //!
-//! Handles ML inference: face detection, sharpness scoring, and blink detection.
-//! Uses ONNX Runtime on CPU.
+//! Handles ML inference: face detection, sharpness scoring, blink detection
+//! and accidental-shot detection. Uses ONNX Runtime on CPU.
 
+pub mod accidental;
 pub mod blink_detector;
 pub mod face_detector;
 pub mod focus_scorer;

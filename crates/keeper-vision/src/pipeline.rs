@@ -11,6 +11,7 @@ use tracing::{debug, info, warn};
 
 use keeper_stacker::hasher::{self, ImageHash};
 
+use crate::accidental::{self, AccidentalDetector};
 use crate::blink_detector::BlinkDetector;
 use crate::face_detector::{FaceDetection, FaceDetector};
 use crate::focus_scorer;
@@ -43,6 +44,10 @@ pub struct CullPipeline {
     /// `analyzers[i]`. ONNX sessions need `&mut` to run, so a single shared
     /// set forced images through one at a time.
     analyzers: Vec<Mutex<Analyzer>>,
+    /// ONE accidental-shot model shared by all workers: CLIP is large
+    /// (~90 MB of weights), a copy per worker would blow the memory budget,
+    /// and it only runs on photos without a face (about a quarter of them).
+    accidental: Mutex<AccidentalDetector>,
     config: CullConfig,
 }
 
@@ -65,10 +70,12 @@ pub fn default_workers() -> usize {
 pub const FACE_MODEL_FILE: &str = "yolov8n-face.onnx";
 
 /// Every model file the pipeline needs, relative to the models directory.
-pub const REQUIRED_MODEL_FILES: [&str; 3] = [
+pub const REQUIRED_MODEL_FILES: [&str; 5] = [
     FACE_MODEL_FILE,
     crate::blink_detector::LANDMARK_MODEL_FILE,
     crate::blink_detector::BLENDSHAPE_MODEL_FILE,
+    accidental::IMAGE_MODEL_FILE,
+    accidental::PROMPTS_FILE,
 ];
 
 /// Returns the required model files missing from `models_dir` (empty = all
@@ -128,8 +135,19 @@ impl CullPipeline {
             .map(|a| a.map(Mutex::new))
             .collect::<Result<Vec<_>>>()?;
 
+        // Shared by all workers, one image at a time, so it gets more threads.
+        let accidental = AccidentalDetector::with_threads(
+            models_dir,
+            (crate::runtime::available_cores() / 2).max(1),
+        )
+        .context("Failed to load accidental-shot model")?;
+
         info!("CullPipeline ready.");
-        Ok(CullPipeline { analyzers, config })
+        Ok(CullPipeline {
+            analyzers,
+            accidental: Mutex::new(accidental),
+            config,
+        })
     }
 
     /// Number of images analysed in parallel.
@@ -288,6 +306,8 @@ impl CullPipeline {
             blink_detected: false,
             blink_score: None,
             peak_sharpness: 0.0,
+            accidental_score: None,
+            likely_accidental: false,
             verdict: Verdict::Unrated,
         };
 
@@ -375,6 +395,37 @@ impl CullPipeline {
         let work_bbox =
             face_bbox.map(|b| preprocess::scale_bbox(&b, 1.0 / decoded.work_to_preview()));
 
+        // ---- Accidental / test shot? (only when no face was found) ----------
+        // A photo with a face is never treated as accidental: on the test
+        // folder every wrongly-flagged photo had a face (selfies, portraits).
+        let accidental_score = if has_face {
+            None
+        } else {
+            let mut detector = self
+                .accidental
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match detector.score(&decoded.small) {
+                Ok(p) => Some(p as f64),
+                Err(e) => {
+                    warn!(
+                        "Accidental-shot check failed for '{}': {}",
+                        image.file_name, e
+                    );
+                    None
+                }
+            }
+        };
+        let likely_accidental =
+            accidental_score.is_some_and(|p| p >= accidental::ACCIDENTAL_THRESHOLD);
+        if likely_accidental {
+            debug!(
+                "'{}' looks accidental (score {:.2})",
+                image.file_name,
+                accidental_score.unwrap_or_default()
+            );
+        }
+
         // ---- Focus (on the work image) ---------------------------------------
         let gray = decoded.work.to_luma8();
         let sharpness_score = match focus_scorer::score_sharpness_gray(&gray, work_bbox.as_ref()) {
@@ -418,6 +469,8 @@ impl CullPipeline {
             blink_detected,
             blink_score,
             peak_sharpness,
+            accidental_score,
+            likely_accidental,
             verdict: Verdict::Unrated,
         };
         (score, Some(phash))
@@ -431,6 +484,9 @@ impl CullPipeline {
 /// - The keeper is the sharpest frame that isn't a clear blink. If every
 ///   usable frame blinked (including a lone frame), the scene has **no**
 ///   keeper: clear blinks are always rejected (av's reject policy).
+/// - A likely accidental / test shot is never the keeper either, but it is
+///   NOT rejected — it stays `Unrated` (the detector can be wrong, and a
+///   wrong reject is worse than a missed one).
 /// - Blinks are `Reject { Blink }`; everything else is `Unrated`.
 pub fn select_keepers(scenes: &mut [Scene], scores: &mut [ImageScore]) {
     let score_map: HashMap<ImageId, &ImageScore> = scores.iter().map(|s| (s.image_id, s)).collect();
@@ -440,7 +496,7 @@ pub fn select_keepers(scenes: &mut [Scene], scores: &mut [ImageScore]) {
             .image_ids
             .iter()
             .filter_map(|id| score_map.get(id).copied())
-            .filter(|s| !is_rejected_in_analysis(s) && !s.blink_detected)
+            .filter(|s| !is_rejected_in_analysis(s) && !s.blink_detected && !s.likely_accidental)
             .collect();
 
         scene.keeper_id = sharpest(&candidates);
@@ -530,6 +586,8 @@ mod tests {
             blink_detected: blink,
             blink_score: None,
             peak_sharpness: 1000.0,
+            accidental_score: None,
+            likely_accidental: false,
             verdict: Verdict::Unrated,
         }
     }
@@ -615,6 +673,25 @@ mod tests {
         assert_eq!(scenes[1].keeper_id, Some(3));
         assert_eq!(scores[0].verdict, blurry);
         assert_eq!(scores[1].verdict, blurry);
+    }
+
+    #[test]
+    fn test_accidental_shot_is_never_keeper_but_not_rejected() {
+        let mut scenes = vec![scene(1, &[1]), scene(2, &[2, 3])];
+        let mut scores = vec![
+            score(1, 50.0, false),
+            score(2, 90.0, false),
+            score(3, 10.0, false),
+        ];
+        scores[0].likely_accidental = true;
+        scores[1].likely_accidental = true;
+        select_keepers(&mut scenes, &mut scores);
+        // A lone accidental shot has no keeper; it never beats a real frame.
+        assert_eq!(scenes[0].keeper_id, None);
+        assert_eq!(scenes[1].keeper_id, Some(3));
+        // Both stay unrated — never rejected.
+        assert_eq!(scores[0].verdict, Verdict::Unrated);
+        assert_eq!(scores[1].verdict, Verdict::Unrated);
     }
 
     #[test]

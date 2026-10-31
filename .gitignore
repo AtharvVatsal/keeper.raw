@@ -56,6 +56,7 @@ test-data/samples/**/*.jpeg
 
 # ONNX models (downloaded separately, too large for git)
 models/*.onnx
+models/clip_prompts.json
 
 # Keeper.raw temp files
 keeper-raw-previews/

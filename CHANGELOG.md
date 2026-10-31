@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Black and blank frames (lens cap, misfires) are rejected as "Unusable" and never chosen as keepers.
+- Photos with nothing in focus (camera shake, missed focus) are rejected as "Out of focus".
+- Accidental / test shots (the floor, a desk, a phone...) are recognised with OpenAI's CLIP model and are never picked as keepers. They stay unrated (never rejected) and show a "TEST SHOT?" badge. Photos with a face are never flagged. On a 118-photo test shoot: 8 of 9 accidental shots flagged, no real photo flagged.
+- Settings and the cull summary warn when face detection confidence is above 70 % (most real faces would be missed).
+- Culls run in the background with a progress bar.
+
+### Changed (keeper rule)
+
+- A clear blink is never the keeper, even when it is the only frame of its moment.
 
 ---
 
