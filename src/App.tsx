@@ -72,6 +72,31 @@ interface CullConfig {
   face_detection_confidence: number;
 }
 
+// =============================================================================
+// FACE CONFIDENCE WARNING
+//
+// Real faces in difficult light (concerts, indoor events) often score only
+// 50–80 % with the face detector. Above 70 % most of them are ignored — and a
+// face that isn't found never gets a blink check, so blinks quietly become
+// keepers. Warn whenever the setting is above this value.
+// =============================================================================
+const FACE_CONFIDENCE_WARN_ABOVE = 0.7;
+
+function isFaceConfidenceTooHigh(confidence: number): boolean {
+  // Small tolerance: the saved value comes back as e.g. 0.7000000476837158.
+  return confidence > FACE_CONFIDENCE_WARN_ABOVE + 0.001;
+}
+
+function FaceConfidenceWarning({ confidence }: { confidence: number }) {
+  return (
+    <p style={{ fontSize: 12, color: "#f59e0b", margin: "6px 0 0 0" }}>
+      ⚠ Face detection confidence is {(confidence * 100).toFixed(0)}%. Many real
+      faces score below {FACE_CONFIDENCE_WARN_ABOVE * 100}%, so they will be
+      missed and their blinks won't be caught. Default: 50%.
+    </p>
+  );
+}
+
 type OverrideVerdict = "keeper" | "reject" | "unrated";
 type OverrideMap = Map<number, OverrideVerdict>;
 function getVerdictLabel(v: Verdict): "keeper" | "reject" | "unrated" {
@@ -367,6 +392,9 @@ function SettingsPanel({
             Min confidence for face detection. Lower = detects more faces
             (including partial). Higher = only high-confidence detections.
           </p>
+          {isFaceConfidenceTooHigh(faceConfidence) && (
+            <FaceConfidenceWarning confidence={faceConfidence} />
+          )}
         </div>
 
         {/* Buttons */}
@@ -1609,6 +1637,11 @@ function App() {
               </span>{" "}
               · {overrideStats.unrated} unrated
             </p>
+            {/* Shown here too: a high value saved long ago is otherwise
+                invisible unless the user opens Settings. */}
+            {config && isFaceConfidenceTooHigh(config.face_detection_confidence) && (
+              <FaceConfidenceWarning confidence={config.face_detection_confidence} />
+            )}
           </div>
         )}
 
