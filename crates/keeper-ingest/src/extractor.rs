@@ -61,13 +61,12 @@ pub fn use_exiftool(command: ExifToolCommand) -> bool {
 /// A `Command` that starts the chosen ExifTool (or the one on the PATH).
 fn exiftool_command() -> Command {
     let mut cmd = match CHOSEN_EXIFTOOL.get() {
-        Some(chosen) => {
-            let mut cmd = Command::new(&chosen.program);
-            cmd.args(&chosen.prefix_args);
-            cmd
-        }
+        Some(chosen) => Command::new(&chosen.program),
         None => Command::new("exiftool"),
     };
+    if let Some(chosen) = CHOSEN_EXIFTOOL.get() {
+        cmd.args(&chosen.prefix_args);
+    }
     // ExifTool is a console program. Started from the windowed app, Windows
     // would flash a black console window for every call.
     #[cfg(windows)]
