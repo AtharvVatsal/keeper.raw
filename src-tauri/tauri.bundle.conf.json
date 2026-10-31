@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../models/yolov8n-face.onnx": "models/yolov8n-face.onnx",
+      "../models/face_landmarks_detector.onnx": "models/face_landmarks_detector.onnx",
+      "../models/face_blendshapes.onnx": "models/face_blendshapes.onnx",
+      "../models/clip_vit_b32_image.onnx": "models/clip_vit_b32_image.onnx",
+      "../models/clip_prompts.json": "models/clip_prompts.json"
+    }
+  }
+}

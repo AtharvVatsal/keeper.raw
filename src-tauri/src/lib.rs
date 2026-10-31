@@ -5,8 +5,9 @@ use keeper_xmp::{ExportEntry, ExportVerdict};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::{command, AppHandle, Emitter, State};
+use tauri::{command, AppHandle, Emitter, Manager, State};
 
 pub struct AppState {
     pub images: Mutex<Vec<ImageRecord>>,
@@ -88,6 +89,61 @@ fn save_config_to_disk(config: &CullConfig) -> Result<(), String> {
 
     eprintln!("Config saved to: {}", path.display());
     Ok(())
+}
+
+// =============================================================================
+// Finding the AI models
+//
+// Installed app: the installer puts the models in the app's "resource"
+// folder (listed in src-tauri/tauri.bundle.conf.json), next to the program on
+// Windows and inside the .app bundle on macOS. Tauri tells us where that is.
+//
+// `cargo tauri dev`: nothing is copied, so debug builds also look in the
+// repo's own models/ folder. Release builds never do — otherwise a broken
+// installer would still work on the developer's PC and hide the problem.
+// =============================================================================
+
+/// Folders that may hold the models, in the order they're tried.
+fn model_dir_candidates(app: &AppHandle) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(resources) = app.path().resource_dir() {
+        dirs.push(resources.join("models"));
+    }
+    if cfg!(debug_assertions) {
+        dirs.push(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("models"),
+        );
+    }
+    dirs
+}
+
+/// The first folder that has every model file the pipeline needs, or an
+/// error saying where we looked and what was missing.
+fn find_models_dir(candidates: &[PathBuf]) -> Result<PathBuf, String> {
+    if let Some(dir) = candidates
+        .iter()
+        .find(|d| keeper_vision::pipeline::missing_model_files(d).is_empty())
+    {
+        return Ok(dir.clone());
+    }
+    let looked: Vec<String> = candidates
+        .iter()
+        .map(|d| {
+            format!(
+                "'{}' (missing: {})",
+                d.display(),
+                keeper_vision::pipeline::missing_model_files(d).join(", ")
+            )
+        })
+        .collect();
+    Err(format!(
+        "The AI model files could not be found. Looked in: {}. \
+         If you installed keeper.raw, please reinstall it. \
+         Developers: see models/readme.md.",
+        looked.join("; ")
+    ))
 }
 
 #[command]
@@ -172,20 +228,7 @@ async fn cull_images(app: AppHandle, state: State<'_, AppState>) -> Result<CullM
         return Err("No images loaded. Open a folder first.".to_string());
     }
 
-    // Dev builds run from src-tauri/, hence "../models" (known limitation —
-    // installed builds will need the Tauri resource path instead).
-    let models_dir = std::path::PathBuf::from("../models");
-    let missing = keeper_vision::pipeline::missing_model_files(&models_dir);
-    if !missing.is_empty() {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        return Err(format!(
-            "Missing model file(s) in '{}': {}. Current directory: '{}'. \
-             See models/readme.md, and run 'cargo tauri dev' from the project root folder.",
-            models_dir.display(),
-            missing.join(", "),
-            cwd.display()
-        ));
-    }
+    let models_dir = find_models_dir(&model_dir_candidates(&app))?;
 
     let config = state.config.lock().map_err(|e| e.to_string())?.clone();
 
@@ -296,4 +339,42 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A temp folder containing the given model files (empty files are
+    /// enough: only their presence is checked).
+    fn folder_with(name: &str, files: &[&str]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("keeper-raw-models-test-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for f in files {
+            fs::write(dir.join(f), b"").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn test_first_complete_folder_wins() {
+        let all = keeper_vision::pipeline::REQUIRED_MODEL_FILES;
+        let partial = folder_with("partial", &all[..2]);
+        let complete = folder_with("complete", &all);
+        let also_complete = folder_with("also-complete", &all);
+        let found = find_models_dir(&[partial, complete.clone(), also_complete]).unwrap();
+        assert_eq!(found, complete);
+    }
+
+    #[test]
+    fn test_error_lists_every_folder_and_missing_file() {
+        let all = keeper_vision::pipeline::REQUIRED_MODEL_FILES;
+        let partial = folder_with("partial-only", &all[1..]);
+        let missing = std::env::temp_dir().join("keeper-raw-models-test-does-not-exist");
+        let err = find_models_dir(&[partial.clone(), missing.clone()]).unwrap_err();
+        assert!(err.contains(&partial.display().to_string()));
+        assert!(err.contains(&missing.display().to_string()));
+        assert!(err.contains(all[0]), "{err}");
+    }
 }

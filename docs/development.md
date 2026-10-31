@@ -58,9 +58,14 @@ cargo clippy --workspace -- -D warnings
 # Format
 cargo fmt --all
 
-# Build a release binary
-cargo tauri build
+# Build the installers (models from models/ are packed inside)
+npm run package
 ```
+
+`npm run package` runs `tauri build` with `src-tauri/tauri.bundle.conf.json`, which lists the
+model files to put in the installer. They're kept out of the main `tauri.conf.json` because the
+models aren't in git: listing them there would make every build without them (e.g. CI) fail.
+Installers land in `target/release/bundle/` (`.msi` and `-setup.exe` on Windows).
 
 ## Project Structure
 

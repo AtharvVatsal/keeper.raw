@@ -93,13 +93,14 @@ cd keeper.raw
 npm install
 
 # Download the ONNX models (see models/readme.md)
-# Place yolov8n-face.onnx, face_landmarks_detector.onnx and face_blendshapes.onnx in models/
+# Place yolov8n-face.onnx, face_landmarks_detector.onnx, face_blendshapes.onnx,
+# clip_vit_b32_image.onnx and clip_prompts.json in models/
 
 # Run in development mode
 cargo tauri dev
 
-# Build a release
-cargo tauri build
+# Build the installers (bundles the models)
+npm run package
 ```
 
 See the full [Developer Setup Guide](docs/development.md) for detailed instructions.
